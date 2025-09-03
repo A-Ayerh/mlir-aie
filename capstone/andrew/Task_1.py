@@ -16,6 +16,11 @@ from aie.iron.device.tile import AnyComputeTile
 from aie.helpers.taplib.tap import TensorAccessPattern
 import aie.iron as iron
 
+def allocate_mem_tiles(data_ty, size, fifo_name):
+    of_in = ObjectFifo(data_ty,)
+    of_mem = of_in.cons().forward(name=fifo_name)
+
+
 
 @iron.jit(is_placed=False)
 def exercise_5a(input0, output):
@@ -24,21 +29,25 @@ def exercise_5a(input0, output):
 
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
 
-    # Dataflow with ObjectFifos
-    of_in = ObjectFifo(data_ty, depth=3, name="in")
-    of_out = ObjectFifo(data_ty, name="out")
+     # Dataflow with ObjectFifos
+    of_in = ObjectFifo(data_ty, name="in")
+    of_in_mem = of_in.cons().forward(name="in_mem")
+
+    of_out_mem = ObjectFifo(data_ty, name="out")
+    of_out = of_out_mem.cons().forward(name="out_mem")
+    
 
     # Task for the core to perform
     def core_fn(of_in, of_out):
         elem_in = of_in.acquire(1)
         elem_out = of_out.acquire(1)
         for i in range_(data_size):
-            elem_out[i] += elem_in[i]
-        of_in.release(1)
+            elem_out[i] = elem_in[i]
         of_out.release(1)
+        of_in.release(1)
 
     # Create a worker to perform the task
-    my_worker = Worker(core_fn, [of_in.cons(), of_out.prod()])
+    my_worker = Worker(core_fn, [of_in_mem.cons(), of_out_mem.prod()])
 
     # To/from AIE-array runtime data movement
     rt = Runtime()
@@ -51,7 +60,11 @@ def exercise_5a(input0, output):
     my_program = Program(iron.get_current_device(), rt)
 
     # Place components (assign them resources on the device) and generate an MLIR module
-    return my_program.resolve_program(SequentialPlacer())
+    
+    my_program=  my_program.resolve_program(SequentialPlacer())
+    print(my_program)
+
+    return my_program
 
 
 def main():
