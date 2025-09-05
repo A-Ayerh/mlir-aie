@@ -16,40 +16,10 @@ from aie.iron.device.tile import AnyComputeTile
 from aie.helpers.taplib.tap import TensorAccessPattern
 import aie.iron as iron
 
-# Function to dynamically generate object fifos for shim-> mem tiles depending on how much data the user wants to stream in.
-# def allocate_in_mem_tiles(data_ty, size, fifo_name):
-#     l3_l2_fifos = []
-#     numMemFifos = size//(((2**19) * 4) - 128) #Size of mem tile memory
-#     if size//(((2**19) * 4) - 128) > 1:
-#         print("datasize exceeds memory shared across L2")
-#         exit
-#     for i in range(1, numMemFifos):
-#         fifos[i+"of_in"] = ObjectFifo(data_ty, name=fifo_name+"_in_"+"{i}")
-#         fifos[i+"of_mem_in"] = fifos[i+"of_in"].cons().forward(name=fifo_name+"_in_mem_"+"{i}")
-        
-    
-#     return fifos
-
-# Function to dynamically generate object fifos for mem -> shim tiles depending on how much data the user wants to stream out.
-# def allocate_out_mem_tiles(data_ty, size, fifo_name):
-#     fifos = {}
-#     for i in range(1, size//(512*i)):
-#         if i == 5:
-#             print("datasize exceeds memory shared across L2")
-#             break
-#         fifos[i+"of_mem_out"] = ObjectFifo(data_ty, name=fifo_name+"_out_mem_"+"{i}")
-#         fifos[i+"of_out"] = fifos[i+"of_mem_out"].cons().forward(name=fifo_name+"_out_"+"{i}")
-        
-    
-#     return fifos
-
-
-
 @iron.jit(is_placed=False)
 def exercise_5a(input0, output):
     data_size = input0.numel()
     element_type = input0.dtype
-
 
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
     
@@ -58,8 +28,8 @@ def exercise_5a(input0, output):
     l3_l2_fifos = []
     l3_l2_temp = []
     numMemFifos = 1
-    if data_size//(((2**19) * 4) - 128) > 1:#Size of mem tile memory
-        numMemFifos = (data_size//(((2**19) * 4) - 128)) + 1
+    if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
+        numMemFifos = (data_size//(((2**19) * 4) - 1))
     if numMemFifos > 4:
         print("datasize exceeds memory shared across L2")
         exit
@@ -69,18 +39,69 @@ def exercise_5a(input0, output):
         l3_l2_fifos.append(fifo)
         l3_l2_temp.append(temp)
         
-        #TODO: Need to split up data around weach memtile, the objectfifo generation works now, but the data is all being sent to the first mem fifo
     #Mem tiles -> shim
-    
-    # fifos_out = allocate_out_mem_tiles(data_ty, data_size, "a")
-    # print(fifos_out[0])
-    
+    l2_l3_fifos = []
+    l2_l3_temp = []
+    numMemFifos = 1
+    if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
+        numMemFifos = (data_size//(((2**19) * 4) - 1))
+    if numMemFifos > 4:
+        print("datasize exceeds memory shared across L2")
+        exit
+    for i in range(numMemFifos):
+        fifo = ObjectFifo(data_ty, name="l2_l3_fifos{i}")
+        temp = fifo.cons().forward(name="l2_l3_temp{i}")
+        l2_l3_fifos.append(fifo)
+        l2_l3_temp.append(temp)
+
     # Shim -> Compute tile
+    l3_l1_fifos = []
+    numCTFifos = 1
+    if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
+        numCTFifos = (data_size//(((2**12) * 4) - 64))
+    if numCTFifos > 16:
+        print("datasize exceeds memory shared across L1")
+        exit
+    for i in range(numCTFifos):
+        fifo = ObjectFifo(data_ty, name="l3_l1_fifos{i}")
+        l3_l1_fifos.append(fifo)
+
     # Compute tile -> Shim
+    l1_l3_fifos = []
+    numCTFifos = 1
+    if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
+        numCTFifos = (data_size//(((2**12) * 4) - 64))
+    if numCTFifos > 16:
+        print("datasize exceeds memory shared across L1")
+        exit
+    for i in range(numCTFifos):
+        fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
+        l1_l3_fifos.append(fifo)
 
-    #Mem tile -> Compute tile:
+    #Mem tile -> Compute tile: 4 mem tiles -> 16 compute tiles
+    #need to have fifos for each memtile (64 fifos)
+    l2_l1_fifos = []
+    numCTFifos = 1
+    if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
+        numCTFifos = (data_size//(((2**12) * 4) - 64))
+    if numCTFifos > 16:
+        print("datasize exceeds memory shared across L1")
+        exit
+    for i in range(numCTFifos):
+        fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
+        l2_l1_fifos.append(fifo)
+
     #Compute Tile -> Mem tile:
-
+    l1_l2_fifos = []
+    numCTFifos = 1
+    if data_size//(((2**19) * 4) - 1) > 1:#Size of compute tile memory
+        numCTFifos = (data_size//(((2**12) * 4) - 64))
+    if numCTFifos > 4:
+        print("datasize exceeds memory shared across L2")
+        exit
+    for i in range(numCTFifos):
+        fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
+        l1_l2_fifos.append(fifo)
     
 
     
@@ -105,6 +126,7 @@ def exercise_5a(input0, output):
     #my_worker = Worker(core_fn, [of_in_mem.cons(), of_out_mem.prod()])
 
     # To/from AIE-array runtime data movement
+    #TODO: Need to split up data around weach memtile, the objectfifo generation works now, but the data is all being sent to the first mem fifo
     rt = Runtime()
     with rt.sequence(data_ty, data_ty) as (a_in, c_out):
         # rt.start(my_worker)
