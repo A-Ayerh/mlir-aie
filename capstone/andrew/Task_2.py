@@ -17,7 +17,7 @@ from aie.helpers.taplib.tap import TensorAccessPattern
 import aie.iron as iron
 
 @iron.jit(is_placed=False)
-def exercise_5a(input0, output):
+def exercise_5a(input0, output, l3_l2, l3_l1, l2_l3, l2_l1, l1_l2, l1_l3):
     data_size = input0.numel()
     element_type = input0.dtype
 
@@ -25,83 +25,89 @@ def exercise_5a(input0, output):
     
     #TODO:generate object fifos to handle amount of data:
     #Shim -> Mem tiles
-    l3_l2_fifos = []
-    l3_l2_temp = []
-    numMemFifos = 1
-    if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
-        numMemFifos = (data_size//(((2**19) * 4) - 1))
-    if numMemFifos > 4:
-        print("datasize exceeds memory shared across L2")
-        exit
-    for i in range(numMemFifos):
-        fifo = ObjectFifo(data_ty, name="l3_l2_fifos{i}")
-        temp = fifo.cons().forward(name="l3_l2_temp{i}")
-        l3_l2_fifos.append(fifo)
-        l3_l2_temp.append(temp)
+    if(l3_l2):
+        l3_l2_fifos = []
+        l3_l2_temp = []
+        numMemFifos = 1
+        if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
+            numMemFifos = (data_size//(((2**19) * 4) - 1))
+        if numMemFifos > 4:
+            print("datasize exceeds memory shared across L2")
+            exit
+        for i in range(numMemFifos):
+            fifo = ObjectFifo(data_ty, name="l3_l2_fifos{i}")
+            temp = fifo.cons().forward(name="l3_l2_temp{i}")
+            l3_l2_fifos.append(fifo)
+            l3_l2_temp.append(temp)
         
     #Mem tiles -> shim
-    l2_l3_fifos = []
-    l2_l3_temp = []
-    numMemFifos = 1
-    if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
-        numMemFifos = (data_size//(((2**19) * 4) - 1))
-    if numMemFifos > 4:
-        print("datasize exceeds memory shared across L2")
-        exit
-    for i in range(numMemFifos):
-        fifo = ObjectFifo(data_ty, name="l2_l3_fifos{i}")
-        temp = fifo.cons().forward(name="l2_l3_temp{i}")
-        l2_l3_fifos.append(fifo)
-        l2_l3_temp.append(temp)
+    if(l2_l3):
+        l2_l3_fifos = []
+        l2_l3_temp = []
+        numMemFifos = 1
+        if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
+            numMemFifos = (data_size//(((2**19) * 4) - 1))
+        if numMemFifos > 4:
+            print("datasize exceeds memory shared across L2")
+            exit
+        for i in range(numMemFifos):
+            fifo = ObjectFifo(data_ty, name="l2_l3_fifos{i}")
+            temp = fifo.cons().forward(name="l2_l3_temp{i}")
+            l2_l3_fifos.append(fifo)
+            l2_l3_temp.append(temp)
 
     # Shim -> Compute tile
-    l3_l1_fifos = []
-    numCTFifos = 1
-    if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
-        numCTFifos = (data_size//(((2**12) * 4) - 64))
-    if numCTFifos > 16:
-        print("datasize exceeds memory shared across L1")
-        exit
-    for i in range(numCTFifos):
-        fifo = ObjectFifo(data_ty, name="l3_l1_fifos{i}")
-        l3_l1_fifos.append(fifo)
+    if(l3_l1):
+        l3_l1_fifos = []
+        numCTFifos = 1
+        if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
+            numCTFifos = (data_size//(((2**12) * 4) - 64))
+        if numCTFifos > 16:
+            print("datasize exceeds memory shared across L1")
+            exit
+        for i in range(numCTFifos):
+            fifo = ObjectFifo(data_ty, name="l3_l1_fifos{i}")
+            l3_l1_fifos.append(fifo)
 
     # Compute tile -> Shim
-    l1_l3_fifos = []
-    numCTFifos = 1
-    if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
-        numCTFifos = (data_size//(((2**12) * 4) - 64))
-    if numCTFifos > 16:
-        print("datasize exceeds memory shared across L1")
-        exit
-    for i in range(numCTFifos):
-        fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
-        l1_l3_fifos.append(fifo)
+    if(l1_l3):
+        l1_l3_fifos = []
+        numCTFifos = 1
+        if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
+            numCTFifos = (data_size//(((2**12) * 4) - 64))
+        if numCTFifos > 16:
+            print("datasize exceeds memory shared across L1")
+            exit
+        for i in range(numCTFifos):
+            fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
+            l1_l3_fifos.append(fifo)
 
     #Mem tile -> Compute tile: 4 mem tiles -> 16 compute tiles
     #need to have fifos for each memtile (64 fifos)
-    l2_l1_fifos = []
-    numCTFifos = 1
-    if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
-        numCTFifos = (data_size//(((2**12) * 4) - 64))
-    if numCTFifos > 16:
-        print("datasize exceeds memory shared across L1")
-        exit
-    for i in range(numCTFifos):
-        fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
-        l2_l1_fifos.append(fifo)
+    if(l2_l1):
+        l2_l1_fifos = []
+        numCTFifos = 1
+        if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
+            numCTFifos = (data_size//(((2**12) * 4) - 64))
+        if numCTFifos > 16:
+            print("datasize exceeds memory shared across L1")
+            exit
+        for i in range(numCTFifos):
+            fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
+            l2_l1_fifos.append(fifo)
 
     #Compute Tile -> Mem tile:
-    l1_l2_fifos = []
-    numCTFifos = 1
-    if data_size//(((2**19) * 4) - 1) > 1:#Size of compute tile memory
-        numCTFifos = (data_size//(((2**12) * 4) - 64))
-    if numCTFifos > 4:
-        print("datasize exceeds memory shared across L2")
-        exit
-    for i in range(numCTFifos):
-        fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
-        l1_l2_fifos.append(fifo)
+    if(l1_l2):
+        l1_l2_fifos = []
+        numCTFifos = 1
+        if data_size//(((2**19) * 4) - 1) > 1:#Size of compute tile memory
+            numCTFifos = (data_size//(((2**12) * 4) - 64))
+        if numCTFifos > 4:
+            print("datasize exceeds memory shared across L2")
+            exit
+        for i in range(numCTFifos):
+            fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
+            l1_l2_fifos.append(fifo)
     
 
     
@@ -131,8 +137,16 @@ def exercise_5a(input0, output):
     with rt.sequence(data_ty, data_ty) as (a_in, c_out):
         # rt.start(my_worker)
         for i in range(numMemFifos):
-            rt.fill(l3_l2_fifos[i].prod(), a_in)
-            rt.drain(l3_l2_temp[i].cons(), c_out, wait=True)
+            if(l3_l1):
+                rt.fill(l3_l1_fifos[i].prod(), a_in)
+            if(l3_l2):
+                rt.fill(l3_l2_temp[i].prod(), a_in)
+            if(l1_l3):
+                rt.drain(l1_l3_fifos[i].cons(), c_out, wait=True)
+            if(l2_l3):
+                rt.drain(l2_l3_temp[i].cons(), c_out, wait=True)
+            
+            
 
     # Create the program from the device type and runtime
     my_program = Program(iron.get_current_device(), rt)
@@ -152,8 +166,15 @@ def main():
 
     input0 = iron.arange(data_size, dtype=element_type, device="npu")
     output = iron.zeros(data_size, dtype=element_type, device="npu")
+
+    l3_l2 = False
+    l3_l1 = True
+    l2_l3 = False
+    l2_l1 = False
+    l1_l2 = False
+    l1_l3 = True
     
-    exercise_5a(input0, output)
+    exercise_5a(input0, output, l3_l2, l3_l1, l2_l3, l2_l1, l1_l2, l1_l3)
 
     print(output)
 
