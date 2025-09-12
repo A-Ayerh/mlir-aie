@@ -19,6 +19,7 @@ import numpy as np
 from aie.iron import Program, Runtime, Worker, ObjectFifo, LocalBuffer
 from aie.iron.placers import SequentialPlacer
 from aie.iron.controlflow import range_
+from aie.iron import ExternalFunction
 
 import aie.iron as iron
 
@@ -31,9 +32,11 @@ def exercise_1(input0, output0): #add input 0
 
     #Compute Tiles (workers)
     num_workers = 3 #set number of compute tiles to use (number of workers)
-    if data_size % num_workers != 0: #check to see if data is divisible by num_workers
-        raise ValueError("input data_size must be divisible by 3")
+    vector_length = 16 # int32 vector length (512 bit vector unit)
+    if data_size % (num_workers * vector_length) != 0: #check to see if data is divisible by num_workers * vector_length
+        raise ValueError("input data_size must be divisible by num_workers * vector_length")
     worker_data_size = data_size // num_workers #compute array elements per worker
+    worker_vector_size = worker_data_size // vector_length # number of vector operations for each worker
     worker_data_type = np.ndarray[(worker_data_size,), np.dtype[element_type]] #data type of each split segment
     
     #ObjectFIFO Offsets for splitting and joining
@@ -62,12 +65,23 @@ def exercise_1(input0, output0): #add input 0
     # Each has name out_o, out_1, ...
     of_outs = of_out.prod().join(of_offsets, obj_types=[worker_data_type] * num_workers, names=[f"out_{i}" for i in range(num_workers)])
 
+    # Define ExternalFunction that performs vectorized multiplication
+    vector_multiplication = ExternalFunction(
+            "internal_multiply",
+            source_file="./multiply.cc",
+            arg_types=[
+                np.ndarray[(vector_length,), np.dtype[np.int32]],
+                np.ndarray[(vector_length,), np.dtype[np.int32]],
+                np.int32,
+                np.int32
+            ]
+    )
+
     # Task for the core to perform
-    def core_fn(of_in, of_out, multiplier): # takes 2 arguments (input objectFifo of worker segment and output objectFifo)
+    def core_fn(of_in, of_out, multiplier, function_to_apply): # takes 2 arguments (input objectFifo of worker segment and output objectFifo)
         elem_in = of_in.acquire(1) 
         elem_out = of_out.acquire(1)
-        for i in range_(worker_data_size): # loops over smaller data size receiving from split (of_ins[i]) and writing to join (of_outs[i])
-            elem_out[i] = multiplier * elem_in[i] # copies to out array
+        function_to_apply(elem_in, elem_out, vector_length, multiplier)
         of_in.release(1) 
         of_out.release(1)
 
@@ -77,9 +91,8 @@ def exercise_1(input0, output0): #add input 0
     # Each worker will copy the input array into the output array, multiplying each index by their worker id
     workers = []
     for i in range(num_workers):
-        worker = Worker(core_fn, [of_ins[i].cons(), of_outs[i].prod(), i+1])
+        worker = Worker(core_fn, [of_ins[i].cons(), of_outs[i].prod(), i+1, vector_multiplication])
         workers.append(worker)
-
 
     # To/from AIE-array runtime data movement
     # Handles two tensors c_in and c_out
