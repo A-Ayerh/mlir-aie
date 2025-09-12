@@ -17,9 +17,11 @@ import sys
 import numpy as np
 
 from aie.iron import Program, Runtime, Worker, ObjectFifo, LocalBuffer
-from aie.iron.placers import SequentialPlacer
+from aie.iron.placers import Placer, SequentialPlacer
 from aie.iron.controlflow import range_
 from aie.iron import ExternalFunction
+from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Tile
+from aie.iron.dataflow import ObjectFifoHandle, ObjectFifoLink, ObjectFifoEndpoint
 
 import aie.iron as iron
 
@@ -94,11 +96,70 @@ def exercise_1(input0, output0): #add input 0
         worker = Worker(core_fn, [of_ins[i].cons(), of_outs[i].prod(), i+1, vector_multiplication])
         workers.append(worker)
 
+    # Custom placer class for manual tile assignment
+    class CustomPlacer(Placer): # Inherits from Placer class, must implement "make_placement(device, rt, workers, object_fifos)"
+        def make_placement(self, device, rt, workers, object_fifos):
+            # Resolve tiles for MemTile (0,1) and ComputeTiles (0,2), (0,3), (0,4)
+            shim_tile = Tile(0,0) # use shim_tile on (0,0)
+            mem_tile = Tile(0, 1) # use mem_tile on (0,1)
+            device.resolve_tile(shim_tile) # allows .place operations
+            device.resolve_tile(mem_tile) 
+            compute_tiles = [
+                Tile(0, 2),
+                Tile(0, 3),
+                Tile(0, 4)
+            ]
+            for tile in compute_tiles:
+                device.resolve_tile(tile)
+
+            # Assign workers to compute tiles: (0,2), (0,3), (0,4)
+            for i, worker in enumerate(workers): # place workers to compute tiles
+                worker.place(compute_tiles[i])
+                for buffer in worker.buffers:
+                    buffer.place(compute_tiles[i])
+
+            #Track placed endpoints to avoid duplicates
+            placed_endpoints = set()
+            # Assign ObjectFifo endpoints to MemTile (0,1), skipping Worker endpoints
+            for ofh in object_fifos:
+                if ofh.name == "in": 
+                    # Place of_in producer on ShimTile (0,0), consumer on MemTile (0,1)
+                    prod_endpoint = ofh._object_fifo._get_endpoint(is_prod=True)
+                    for ep in prod_endpoint:
+                        if id(ep) not in placed_endpoints:
+                            ep.place(shim_tile)
+                            placed_endpoints.add(id(ep))
+                    cons_endpoint = ofh._object_fifo._get_endpoint(is_prod=False)
+                    for ep in cons_endpoint:
+                        if id(ep) not in placed_endpoints and not isinstance(ep, Worker):
+                            ep.place(mem_tile)
+                            placed_endpoints.add(id(ep))
+                elif ofh.name == "out":
+                    # Place of_out consumer on ShimTile (0,0), producer on MemTile (0,1)
+                    cons_endpoint = ofh._object_fifo._get_endpoint(is_prod=False)
+                    for ep in cons_endpoint:
+                        if id(ep) not in placed_endpoints:
+                            ep.place(shim_tile)
+                            placed_endpoints.add(id(ep))
+                    prod_endpoint = ofh._object_fifo._get_endpoint(is_prod=True)
+                    for ep in prod_endpoint:
+                        if id(ep) not in placed_endpoints and not isinstance(ep, Worker):
+                            ep.place(mem_tile)
+                            placed_endpoints.add(id(ep))
+                else:
+                    # Place other ObjectFifo endpoints (e.g., in_0, in_1, in_2, out_0, out_1, out_2) on MemTile (0,1)
+                    for ep in ofh.all_of_endpoints():
+                        if id(ep) not in placed_endpoints and not isinstance(ep, Worker):
+                            ep.place(mem_tile)
+                            placed_endpoints.add(id(ep))
+
+            return device
+
     # To/from AIE-array runtime data movement
     # Handles two tensors c_in and c_out
     # Added rt.fill to transfer input tensor (input0) to input ObjectFifo (of_in)
     # Wait ensures all workers finish before draining output to output array
-    rt = Runtime()
+    rt = Runtime() # Implicitily handles shim tile not included in my_custom_placer
     with rt.sequence(data_ty, data_ty) as (c_in, c_out):
         for worker in workers:
             rt.start(worker)
@@ -109,13 +170,16 @@ def exercise_1(input0, output0): #add input 0
     my_program = Program(iron.get_current_device(), rt)
 
     # Place components (assign them resources on the device) and generate an MLIR module
-    return my_program.resolve_program(SequentialPlacer())
+    placer = CustomPlacer()
+    return my_program.resolve_program(placer)
 
 
 def main():
     # Define tensor shapes and data types
+    num_workers = 3
     data_size = 48
     element_type = np.int32
+    worker_data_size = data_size // num_workers
 
     # Construct an input tensor and an output zeroed tensor
     # The two tensors are in memory accessible to the NPU
@@ -126,16 +190,23 @@ def main():
     # to the kernel will use the same compiled kernel and loaded code objects
     exercise_1(input0, output0) # update to pass input0 array
 
+    # Expected verification output
+    expected = np.zeros(data_size, dtype=element_type)
+    for i in range(num_workers):
+        starting_index = i * worker_data_size
+        ending_index = (i+1) * worker_data_size
+        expected[starting_index:ending_index] = input0[starting_index:ending_index] * (i+1)
+
     # Check the correctness of the result
-    e = np.equal(input0.numpy(), output0.numpy())
+    e = np.equal(expected, output0.numpy())
     errors = np.size(e) - np.count_nonzero(e)
 
     # Print the results
-    print(f"{'input0':>4} = {'output0':>4}")
+    print(f"{'input0':>8} {'output0':>8} {'expected':>8}")
     print("-" * 34)
     count = input0.numel()
-    for idx, (a, c) in enumerate(zip(input0[:count], output0[:count])):
-        print(f"{idx:2}: {a:4} = {c:4}")
+    for idx, (a, c, exp) in enumerate(zip(input0[:count], output0[:count], expected[:count])):
+        print(f"{idx:2}: {a:6} {c:8} {exp:8}")
 
     # If the result is correct, exit with a success code.
     # Otherwise, exit with a failure code
