@@ -15,99 +15,148 @@ from aie.iron.controlflow import range_
 from aie.iron.device.tile import AnyComputeTile
 from aie.helpers.taplib.tap import TensorAccessPattern
 import aie.iron as iron
+from aie.iron.dataflow.objectfifo import ObjectFifoLink, ObjectFifoHandle, object_fifo_link
+from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
+from aie.iron.jit import compile_external_kernel
+
 
 @iron.jit(is_placed=False)
 def exercise_5a(input0, output, l3_l2, l3_l1, l2_l3, l2_l1, l1_l2, l1_l3):
     data_size = input0.numel()
     element_type = input0.dtype
 
+    Cols = 4
+
+    CTRows = 4
+    MTRows = 1
+    ITRows = 1
+    
+    n_aie_rows = 4
+    n_aie_cols = 4
+    n_aie_cores = n_aie_rows * n_aie_cols
+
+    fifo_depth = 2
+
+    #n_tiles_per_core = (M // m) * (N // n) // n_aie_cores
+
+    # When using more AIE columns than n_aie_rows (4) (applicable to NPU2),
+    # restrict the number of shim/mem tiles to n_aie_rows,
+    # since we have only n_aie_rows row tiles for matrix A
+    if n_aie_cols > n_aie_rows:
+        n_shim_mem_A = n_aie_rows
+    # When using n_aie_rows (4) or less AIE columns (both NPU and NPU2),
+    # the number of shim/mem tiles are equal to n_aie_cols.
+    # We use the distribute pattern in object FIFO (see linking for A below),
+    # since we have n_aie_rows (4) row tiles for matrix A
+    else:
+        n_shim_mem_A = n_aie_cols
+
+    # Integer division when n_aie_cols < 4, otherwise set to 1
+    n_A_tiles_per_shim = n_aie_rows // n_aie_cols if n_aie_cols < 4 else 1
+
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
+    A_ty = np.ndarray[(M * K,), np.dtype[dtype_in]]
+    B_ty = np.ndarray[(K * N,), np.dtype[dtype_in]]
+    C_ty = np.ndarray[(M * N,), np.dtype[dtype_out]]
+    A_l2_ty = np.ndarray[(m * k * n_A_tiles_per_shim,), np.dtype[dtype_in]]
+    B_l2_ty = np.ndarray[(k * n,), np.dtype[dtype_in]]
+    C_l2_ty = np.ndarray[(m * n * n_aie_rows,), np.dtype[dtype_out]]
+    A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
+    B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
+    C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
+
     
     #TODO:generate object fifos to handle amount of data:
-    #Shim -> Mem tiles
-    if(l3_l2):
-        l3_l2_fifos = []
-        l3_l2_temp = []
-        numMemFifos = 1
-        if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
-            numMemFifos = (data_size//(((2**19) * 4) - 1))
-        if numMemFifos > 4:
-            print("datasize exceeds memory shared across L2")
-            exit
-        for i in range(numMemFifos):
-            fifo = ObjectFifo(data_ty, name="l3_l2_fifos{i}")
-            temp = fifo.cons().forward(name="l3_l2_temp{i}")
-            l3_l2_fifos.append(fifo)
-            l3_l2_temp.append(temp)
-        
-    #Mem tiles -> shim
-    if(l2_l3):
-        l2_l3_fifos = []
-        l2_l3_temp = []
-        numMemFifos = 1
-        if data_size//(((2**19) * 4) - 1) > 1:#Size of mem tile memory
-            numMemFifos = (data_size//(((2**19) * 4) - 1))
-        if numMemFifos > 4:
-            print("datasize exceeds memory shared across L2")
-            exit
-        for i in range(numMemFifos):
-            fifo = ObjectFifo(data_ty, name="l2_l3_fifos{i}")
-            temp = fifo.cons().forward(name="l2_l3_temp{i}")
-            l2_l3_fifos.append(fifo)
-            l2_l3_temp.append(temp)
+    # Tile declarations as tile[row][col]
+    tiles = [[(col, row) for col in range(0, n_aie_cols)] for row in range(0, 6)]
+    core_tiles = tiles[2:]
 
-    # Shim -> Compute tile
-    if(l3_l1):
-        l3_l1_fifos = []
-        numCTFifos = 1
-        if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
-            numCTFifos = (data_size//(((2**12) * 4) - 64))
-        if numCTFifos > 16:
-            print("datasize exceeds memory shared across L1")
-            exit
-        for i in range(numCTFifos):
-            fifo = ObjectFifo(data_ty, name="l3_l1_fifos{i}")
-            l3_l1_fifos.append(fifo)
+    # AIE-array data movement with object fifos
+    A_l3l2_fifos = [None] * n_shim_mem_A
+    A_l2l1_fifos = [None] * n_aie_rows
 
-    # Compute tile -> Shim
-    if(l1_l3):
-        l1_l3_fifos = []
-        numCTFifos = 1
-        if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
-            numCTFifos = (data_size//(((2**12) * 4) - 64))
-        if numCTFifos > 16:
-            print("datasize exceeds memory shared across L1")
-            exit
-        for i in range(numCTFifos):
-            fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
-            l1_l3_fifos.append(fifo)
+    B_l3l2_fifos = [None] * n_aie_cols
+    B_l2l1_fifos = [None] * n_aie_cols
 
-    #Mem tile -> Compute tile: 4 mem tiles -> 16 compute tiles
-    #need to have fifos for each memtile (64 fifos)
-    if(l2_l1):
-        l2_l1_fifos = []
-        numCTFifos = 1
-        if data_size//(((2**12) * 4) - 64) > 1:#Size of compute tile memory
-            numCTFifos = (data_size//(((2**12) * 4) - 64))
-        if numCTFifos > 16:
-            print("datasize exceeds memory shared across L1")
-            exit
-        for i in range(numCTFifos):
-            fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
-            l2_l1_fifos.append(fifo)
+    C_l1l2_fifos = [[None] * n_aie_cols for _ in range(n_aie_rows)]
+    C_l2l3_fifos = [None] * n_aie_cols
 
-    #Compute Tile -> Mem tile:
-    if(l1_l2):
-        l1_l2_fifos = []
-        numCTFifos = 1
-        if data_size//(((2**19) * 4) - 1) > 1:#Size of compute tile memory
-            numCTFifos = (data_size//(((2**12) * 4) - 64))
-        if numCTFifos > 4:
-            print("datasize exceeds memory shared across L2")
-            exit
-        for i in range(numCTFifos):
-            fifo = ObjectFifo(data_ty, name="l1_l3_fifos{i}")
-            l1_l2_fifos.append(fifo)
+    # Input A
+    for i in range(n_shim_mem_A):
+        A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, name=f"A_L3L2_{i}", depth=fifo_depth)
+        # If n_shim_mem_A == n_rows, n_A_tiles_per_shim is 1 and
+        # this simply links a_l3l2_fifos[i] to a_l2l1_fifos[i] directly,
+        # If n_shim_mem_A < n_rows, each column receives multiple rows of
+        # tiles; distribute it along rows of AIE cores.
+        start_row = i * n_A_tiles_per_shim
+        stop_row = start_row + n_A_tiles_per_shim
+        of_offsets = [m * k * j for j in range(stop_row - start_row)]
+        dims_to_stream = [
+            [
+                (m // r, r * k),
+                (k // s, s),
+                (r, k),
+                (s, 1),
+            ]
+        ] * (stop_row - start_row)
+        a_tmp_fifos = (
+            A_l3l2_fifos[i]
+            .cons()
+            .split(
+                of_offsets,
+                obj_types=[A_l1_ty] * (stop_row - start_row),
+                names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
+                dims_to_stream=dims_to_stream,
+                placement=Tile(
+                    2 * i if n_aie_cols == 8 else i, 1
+                ),  # alternate columns in full 4x8 NPU2 case
+            )
+        )
+
+        for j in range(stop_row - start_row):
+            A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
+
+    # Input B
+    for col in range(n_aie_cols):
+        B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth)
+        if b_col_maj:
+            dims_to_stream = [(n // t, t * k), (k // s, s), (t, k), (s, 1)]
+        else:
+            dims_to_stream = [(k // s, s * n), (n // t, t), (s, n), (t, 1)]
+        B_l2l1_fifos[col] = (
+            B_l3l2_fifos[col]
+            .cons()
+            .forward(
+                obj_type=B_l1_ty,
+                name=f"B_L2L1_{col}",
+                dims_to_stream=dims_to_stream,
+                placement=Tile(col, 1),
+            )
+        )
+
+        # Output C
+        C_l2l3_fifos[col] = ObjectFifo(
+            C_l2_ty,
+            name=f"C_L2L3_{col}",
+            depth=fifo_depth,
+            dims_to_stream=[(m // r, r * n), (r, t), (n // t, r * t), (t, 1)],
+        )
+        of_offsets = [m * n * i for i in range(n_aie_rows)]
+
+        # join along one column
+        c_tmp_fifos = (
+            C_l2l3_fifos[col]
+            .prod()
+            .join(
+                of_offsets,
+                obj_types=[C_l1_ty] * n_aie_rows,
+                names=[f"C_L1L2_{col}_{row}" for row in range(n_aie_rows)],
+                depths=[fifo_depth] * n_aie_rows,
+                placement=Tile(col, 1),
+            )
+        )
+        for j in range(n_aie_rows):
+            C_l1l2_fifos[j][col] = c_tmp_fifos[j]
     
 
     
@@ -116,6 +165,9 @@ def exercise_5a(input0, output, l3_l2, l3_l1, l2_l3, l2_l1, l1_l2, l1_l3):
     # of_in_mem = of_in.cons().forward(name="in_mem")
 
     of_out_mem = ObjectFifo(data_ty, name="out")
+    ObjectFifoLink()
+    object_fifo_link()
+    ObjectFifoHandle()
     of_out = of_out_mem.cons().forward(name="out_mem")
     
 
@@ -136,14 +188,17 @@ def exercise_5a(input0, output, l3_l2, l3_l1, l2_l3, l2_l1, l1_l2, l1_l3):
     rt = Runtime()
     with rt.sequence(data_ty, data_ty) as (a_in, c_out):
         # rt.start(my_worker)
-        for i in range(numMemFifos):
-            if(l3_l1):
+        if(l3_l1):
+            for i in range(numCTFifos):
                 rt.fill(l3_l1_fifos[i].prod(), a_in)
-            if(l3_l2):
+        if(l3_l2):
+            for i in range(numMemFifos):
                 rt.fill(l3_l2_temp[i].prod(), a_in)
-            if(l1_l3):
+        if(l1_l3):
+            for i in range(numCTFifos):
                 rt.drain(l1_l3_fifos[i].cons(), c_out, wait=True)
-            if(l2_l3):
+        if(l2_l3):
+            for i in range(numMemFifos):
                 rt.drain(l2_l3_temp[i].cons(), c_out, wait=True)
             
             
@@ -161,7 +216,7 @@ def exercise_5a(input0, output, l3_l2, l3_l1, l2_l3, l2_l1, l1_l2, l1_l3):
 
 def main():
     # Define tensor shapes and data types
-    data_size = (2**19)-64 # size max for compute tiles streaming in/out int32 and using ping pong buffer for in/out
+    data_size = (2**12)-64 # size max for compute tiles streaming in/out int32 and using ping pong buffer for in/out
     element_type = np.int32
 
     input0 = iron.arange(data_size, dtype=element_type, device="npu")
