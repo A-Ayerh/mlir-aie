@@ -1,19 +1,27 @@
+//===- cascade_mm.cc --------------------------------------------*- C++ -*-===//
+//
+// This file is licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+// Copyright (C) 2024, Advanced Micro Devices, Inc.
+//
+//===----------------------------------------------------------------------===//
+
 #define NOCPP
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <type_traits>
+
+#define REL_WRITE 0
+#define REL_READ 1
+
 #include <aie_api/aie.hpp>
 
-void internal_add_from_file(int* input_a, int* input_b, int* output_c, int tile_size) {
-    for (int i = 0; i < tile_size; i++) {
-        output_c[i] =  input_a[i] + input_b[i];
-    }
-}
-
 template <typename T_in, typename T_out, int rowA, int colA, int colB>
-void matmul_scalar_cascade_put_only(T_in *a, T_in *b) {
+void matmul_scalar_cascade_put_only(T_in *a, T_in *b, T_out *c) {
   event0();
   for (int row = 0; row < rowA; row++) {
     for (int col = 0; col < colB; col++) {
@@ -38,7 +46,7 @@ void matmul_scalar_cascade_get_only(T_in *a, T_in *b, T_out *c) {
       for (int i = 0; i < colA; i++) {
         running_sum += a[row * colA + i] * b[i * colB + col];
       }
-      v16int32 v16 = get_scd_v16int32();
+      v32int16 v16 = get_scd_v16int32();
       running_sum += ext_elem(v16, 0U);
       c[row * colB + col] += running_sum;
     }
@@ -47,7 +55,7 @@ void matmul_scalar_cascade_get_only(T_in *a, T_in *b, T_out *c) {
 }
 
 template <typename T_in, typename T_out, int rowA, int colA, int colB>
-void matmul_scalar_cascade_put_get(T_in *a, T_in *b) {
+void matmul_scalar_cascade_put_get(T_in *a, T_in *b, T_out *c) {
   event0();
   for (int row = 0; row < rowA; row++) {
     for (int col = 0; col < colB; col++) {
@@ -64,9 +72,32 @@ void matmul_scalar_cascade_put_get(T_in *a, T_in *b) {
   event1();
 }
 
-
 extern "C" {
-    #define matmul_scalar_cascade_get_only_c_func(                                 \
+
+// If you want to compile microkernels with different inner tile sizes,
+// define DIM_M, DIM_K and DIM_N at compile time using -DDIM_M 32 etc.
+// These dimensions must be divisible by the r, s, t dimensions used in
+// the kernels.
+
+#ifndef DIM_M
+#define DIM_M 64
+#endif
+
+#ifndef DIM_K
+#define DIM_K 64
+#endif
+
+#ifndef DIM_N
+#define DIM_N 64
+#endif
+
+#define combos(X)                                                              \
+  X(int16, i16, int16, i16, 4, 4, 4)                                           \
+  X(int16, i16, int32, i32, 4, 4, 4)                                           \
+  X(bfloat16, bf16, bfloat16, bf16, 4, 8, 4)                                   \
+  X(bfloat16, bf16, float, f32, 4, 8, 4)
+
+#define matmul_scalar_cascade_get_only_c_func(                                 \
     ctype_in, mlir_type_in, ctype_out, mlir_type_out, r, s, t)                 \
   void matmul_scalar_cascade_get_only_##mlir_type_in##_##mlir_type_out(        \
       ctype_in *a_in, ctype_in *b_in, ctype_out *c_out) {                      \
@@ -89,4 +120,8 @@ extern "C" {
     matmul_scalar_cascade_put_get<ctype_in, ctype_out, DIM_M, DIM_K, DIM_N>(   \
         a_in, b_in, c_out);                                                    \
   }
-}
+
+combos(matmul_scalar_cascade_get_only_c_func)
+    combos(matmul_scalar_cascade_put_only_c_func)
+        combos(matmul_scalar_cascade_put_get_c_func)
+} // extern "C"
