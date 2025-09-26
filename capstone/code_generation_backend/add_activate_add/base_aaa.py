@@ -32,24 +32,29 @@ def base_aaa(inputA, inputB, outputC):
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
 
     # Object fifos goes here... --------------------------------------------\/
-    inA_CT1 = ObjectFifo(data_ty, name="A_L3_L1_CT1") # input A *** shim-> compute tile 1
-    inB_CT1 = ObjectFifo(data_ty, name="B_L3_L1") # input B *** shim-> compute tile 1
-    CT1_CT2 = ObjectFifo(data_ty, name="tempC_CT1_CT2") # output C temp *** compute tile 1-> compute tile 2
-    inA_CT3 = ObjectFifo(data_ty, name="A_L3_L1_CT3") # input A *** shim-> compute tile 3
-    CT2_CT3 = ObjectFifo(data_ty, name="tempC_CT2_CT3") # compute tile 2-> compute tile 3
-    outC = ObjectFifo(data_ty, name="C_L1_L3") # compute tile 3 -> shim
+    # inA_CT1 = ObjectFifo(data_ty, name="A_L3_L1_CT1") # input A *** shim-> compute tile 1
+    # inB_CT1 = ObjectFifo(data_ty, name="B_L3_L1") # input B *** shim-> compute tile 1
+    # CT1_CT2 = ObjectFifo(data_ty, name="tempC_CT1_CT2") # output C temp *** compute tile 1-> compute tile 2
+    # inA_CT3 = ObjectFifo(data_ty, name="A_L3_L1_CT3") # input A *** shim-> compute tile 3
+    # CT2_CT3 = ObjectFifo(data_ty, name="tempC_CT2_CT3") # compute tile 2-> compute tile 3
+    # outC = ObjectFifo(data_ty, name="C_L1_L3") # compute tile 3 -> shim
+
+    
 
     #Define kernels here... ------------------------------------------------\/
     element_wise_add = ExternalFunction(
-        "eltwise_add",
-        source_file="../../aie_kernels/aie2/add.cc",
+        name="eltwise_add_bf16_scalar",
+        source_file="../../../aie_kernels/aie2/add.cc",
         arg_types=[data_ty, data_ty, data_ty],
+        include_dirs=["/scratch/andrewa/mlir-aie/aie_kernels/"]
+
     )
 
     relu_activation = ExternalFunction(
-        "relu",
-        source_file="../../aie_kernels/aie2/relu.cc",
+        name="bf16_relu",
+        source_file="../../../aie_kernels/aie2/relu.cc",
         arg_types=[data_ty, data_ty],
+        include_dirs=["/scratch/andrewa/mlir-aie/aie_kernels/"]
     )
 
     # Core functions go here... --------------------------------------------\/
