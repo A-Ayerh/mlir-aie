@@ -32,12 +32,12 @@ def base_aaa(inputA, inputB, outputC):
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
 
     # Object fifos goes here... --------------------------------------------\/
-    # inA_CT1 = ObjectFifo(data_ty, name="A_L3_L1_CT1") # input A *** shim-> compute tile 1
-    # inB_CT1 = ObjectFifo(data_ty, name="B_L3_L1") # input B *** shim-> compute tile 1
-    # CT1_CT2 = ObjectFifo(data_ty, name="tempC_CT1_CT2") # output C temp *** compute tile 1-> compute tile 2
-    # inA_CT3 = ObjectFifo(data_ty, name="A_L3_L1_CT3") # input A *** shim-> compute tile 3
-    # CT2_CT3 = ObjectFifo(data_ty, name="tempC_CT2_CT3") # compute tile 2-> compute tile 3
-    # outC = ObjectFifo(data_ty, name="C_L1_L3") # compute tile 3 -> shim
+    inA_CT1 = ObjectFifo(data_ty, name="A_L3_L1_CT1") # input A *** shim-> compute tile 1
+    inB_CT1 = ObjectFifo(data_ty, name="B_L3_L1") # input B *** shim-> compute tile 1
+    CT1_CT2 = ObjectFifo(data_ty, name="tempC_CT1_CT2") # output C temp *** compute tile 1-> compute tile 2
+    inA_CT3 = ObjectFifo(data_ty, name="A_L3_L1_CT3") # input A *** shim-> compute tile 3
+    CT2_CT3 = ObjectFifo(data_ty, name="tempC_CT2_CT3") # compute tile 2-> compute tile 3
+    outC = ObjectFifo(data_ty, name="C_L1_L3") # compute tile 3 -> shim
 
     
 
@@ -101,6 +101,8 @@ def main():
     inputA = iron.arange(data_size, dtype=datatype, device="npu")
     inputB = iron.arange(data_size, dtype=datatype, device="npu")
     outputC = iron.zeros(data_size, dtype=datatype, device="npu")
+
+    print(inputA.shape(0))
     base_aaa(inputA, inputB, outputC)
     print(outputC)
 
