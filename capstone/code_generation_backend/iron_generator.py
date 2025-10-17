@@ -1,6 +1,8 @@
 import networkx as nx
 from collections import defaultdict
 import re
+import numpy as np
+from ml_dtypes import bfloat16
 
 # Generator function that will take the dataFlowGraph and the new python file as arguments, 
 # will iterate through the graph nodes and edges, and write the corresponding IRON code to 
@@ -22,7 +24,7 @@ import re
 # Hard coded TensorAccessPatterns in runtime code
 # Limited error checking and default values
 # 
-def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_functions:list = None, data_size: int = 8192):
+def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_functions:list = None, data_size: int = 2048):
     
     #Initialize external_functions as empty list if None
     external_functions = external_functions or []
@@ -36,6 +38,7 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     runtime_buffer = []
     split_join_buffer = []
     internal_fifo_buffer = []
+    
 
     # Maps for variables (to be able to reference later)
     tile_map = {}
@@ -45,6 +48,7 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     externalfn_map = {}
     fifo_name_map = {}
     split_outputs = {}
+    externalfn_instances = {}
 
     #----------Input and Output Sources-------------
     # Collect external inputs and outputs of program through shim tiles
@@ -88,20 +92,30 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     num_mem_nodes = len(mem_nodes)
 
     # Calculate dynamic chunk sizes per column
-    col_data_sizes = {}
+    MAX_REPEAT_COUNT = 255
+    max_chunk_size = MAX_REPEAT_COUNT + 1  # 256 max
     chunk_sizes = {}
+    col_data_sizes = {}
+
     for node in mem_nodes:
         col_idx = dataFlowGraph.nodes[node]['placement'].column
         col_data_size = data_size // num_mem_nodes
-        col_data_sizes[col_idx] = col_data_size
         
         # Count workers per column for this mem node
+        out_edges = list(dataFlowGraph.out_edges(node, keys=True))
         out_edges = list(dataFlowGraph.out_edges(node, keys=True))
         worker_count = sum(1 for _, cons, key in out_edges 
                         if (dataFlowGraph.nodes[cons].get('type') == 'compute' and
                             dataFlowGraph.edges[node, cons, key]['name'].startswith('MEM_L2_L1')))
-        chunk_size = col_data_size // max(worker_count, 1)
+        
+        chunk_size = min(max_chunk_size, col_data_size // max(worker_count, 1))
+
+        chunk_size = (chunk_size // 16) * 16  # Align to 16-byte boundary for efficiency
+        if chunk_size == 0:
+            chunk_size = 16  # Minimum workable size
+        
         chunk_sizes[col_idx] = chunk_size
+        col_data_sizes[col_idx] = col_data_size
 
     #----------Tile Definitions-------------------
     # Iterate through graph nodes to generate tile definitions
@@ -152,7 +166,7 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
             in_edges = list(dataFlowGraph.in_edges(node, keys=True))
             out_edges = list(dataFlowGraph.out_edges(node, keys=True))
             col_data_size = col_data_sizes[col_idx]
-            chunk_size = chunk_sizes[col_idx]
+            chunk_size = chunk_sizes[col_idx]  # Use per-column chunk size
             col_offset = col_idx * col_data_size
 
             # Process input edges (from shim through memory tiles to compute tiles)
@@ -355,42 +369,68 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
 
             #----------------External Functions----------------
             #Generate external function if core_fn is external
+            chunk_size = 512
+            element_type = bfloat16
+            data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
+            chunk_ty = np.ndarray[(chunk_size,), np.dtype[element_type]]
+            col_ty = np.ndarray[(col_data_size,), np.dtype[element_type]]
+
             if external_function_def:
-                source_file = external_function_def['source_file']
-                include_dirs = external_function_def['include_dirs']
-                num_arguments = len(in_edges) + len(out_edges)
-                argument_types = external_function_def.get('arg_types', f"[chunk_ty] * {num_arguments}")
+                if core_fn not in externalfn_instances:
+                    source_file = external_function_def['source_file']
+                    include_dirs = external_function_def['include_dirs']
+                    
+                    argument_types = external_function_def.get('arg_types')
+                    if not argument_types:
+                        if core_fn == 'eltwise_add_bf16_vector':
+                            argument_types = "[chunk_ty, chunk_ty, chunk_ty]"
+                        elif core_fn == 'bf16_relu':
+                            argument_types = "[chunk_ty, chunk_ty]"
+                        else:
+                            num_arguments = len(in_edges) + len(out_edges)
+                            argument_types = f"[chunk_ty] * {num_arguments}"
 
-                #generate ExternalFunction object
-                external_variable = f"external_{node.replace('_', '')}"
-                external_buffer.append(
-                    f"{external_variable} = ExternalFunction("
-                    f"name=\"{core_fn}\", "
-                    f"source_file=\"{source_file}\", "
-                    f"arg_types={argument_types}, "
-                    f"include_dirs={include_dirs}"
-                    f")"
-                )
+                    external_variable = f"external_{core_fn.replace('_', '')}"
+                    external_buffer.append(
+                        f"{external_variable} = ExternalFunction("
+                        f"name=\"{core_fn}\", "
+                        f"source_file=\"{source_file}\", "
+                        f"arg_types={argument_types}, "
+                        f"include_dirs={include_dirs}"
+                        f")"
+                    )
+                    externalfn_instances[core_fn] = external_variable
 
-                #Connect external function to map and worker arguments
+                external_variable = externalfn_instances[core_fn]
                 externalfn_map[node] = external_variable
                 function_parameters.append(external_variable)
                 worker_args.append(external_variable)
 
-                #Generate core function with external function call
+                # Generate core function with proper external function call
                 corefn_buffer.append(f"def {function_name}({', '.join(function_parameters)}):")
                 for line in in_acquires + out_acquires:
-                    corefn_buffer.append(f"{line}")
+                    corefn_buffer.append(f"    {line}")
 
-                # Add the 4th argument for external function call
-                if len(call_args) == 3:  # For add and relu functions
-                    call_args_with_size = call_args + [f"bfloat16(chunk_size)"]  # or bfloat16(1.0)
+                # Handle function-specific argument passing
+                if core_fn == 'eltwise_add_bf16_vector':
+                    # Expects: inputA, inputB, output (3 arguments)
+                    if len(call_args) >= 3:
+                        call_args_for_external = call_args[:3]  # inputA, inputB, output
+                    else:
+                        call_args_for_external = call_args
+                elif core_fn == 'bf16_relu':
+                    # Expects: input, output (2 arguments)
+                    if len(call_args) >= 2:
+                        call_args_for_external = call_args[:2]  # input, output
+                    else:
+                        call_args_for_external = call_args
                 else:
-                    call_args_with_size = call_args
+                    # For other functions, use all call_args
+                    call_args_for_external = call_args
                 
-                corefn_buffer.append(f"    {external_variable}({', '.join(call_args_with_size)})")
+                corefn_buffer.append(f"        {external_variable}({', '.join(call_args_for_external)})")
                 for line in in_releases + out_releases:
-                    corefn_buffer.append(f"{line}")
+                    corefn_buffer.append(f"    {line}")
 
             #-------------Internal Core Functions---------------------
             # hard coded for now to include internal python functions eltwise_add_bf16 and bf16_relu
@@ -400,7 +440,7 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
                 for line in in_acquires + out_acquires:
                     corefn_buffer.append(f"{line}")
 
-                if core_fn == 'eltwise_add_bf16_scalar':
+                if core_fn == 'eltwise_add_bf16_vector':
                     # Assumes 2 inputs (A, B) and 1 output (C)
                     # Get shape from first input MemRef
                     corefn_buffer.append(f"    n = {call_args[0]}.shape[0]  # Get length from MemRef shape")
@@ -442,7 +482,7 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     runtime_buffer.append(f"   Workers = [" + ', '.join([f'{w}' for w in worker_map.values()]) + "]")
     runtime_buffer.append("   rt.start(*Workers)")
         
-    npu_chunk_size = chunk_size
+    npu_chunk_size = chunk_sizes[0]
     
     # Generate data movement for input FIFOs (rt.fills)
     for source, fifos in input_fifos.items():
@@ -450,16 +490,17 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
             name = fifo_name_map[fifo_var]
             col_match = re.search(r'col(\d+)', name)
             if col_match:
-                col = int(col_match.group(1))  
-                col_offset = col * col_data_size  
-                num_chunks = col_data_size // npu_chunk_size
+                col = int(col_match.group(1))
+                col_offset = col * col_data_sizes[col]
+                col_chunk_size = chunk_sizes[col]
+                num_chunks = col_data_sizes[col] // col_chunk_size
                 
                 for chunk_idx in range(num_chunks):
-                    chunk_offset = col_offset + chunk_idx * npu_chunk_size
+                    chunk_offset = col_offset + chunk_idx * col_chunk_size
                     runtime_buffer.append(
                         f"   rt.fill({fifo_var}.prod(), {source}, "
                         f"tap=TensorAccessPattern(tensor_dims=[{data_size},], "
-                        f"offset={chunk_offset}, sizes=[{npu_chunk_size},], strides=[1,]))"
+                        f"offset={chunk_offset}, sizes=[{col_chunk_size},], strides=[1,]))"
                     )
             
     # Generate data movement for output FIFOs (rt.drains)
@@ -468,16 +509,17 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
             name = fifo_name_map[fifo_var]
             col_match = re.search(r'col(\d+)', name)
             if col_match:
-                col = int(col_match.group(1))  # FIXED: Don't subtract 1
-                col_offset = col * col_data_size
-                num_chunks = col_data_size // npu_chunk_size
+                col = int(col_match.group(1))
+                col_offset = col * col_data_sizes[col]
+                col_chunk_size = chunk_sizes[col]
+                num_chunks = col_data_sizes[col] // col_chunk_size
                 
                 for chunk_idx in range(num_chunks):
-                    chunk_offset = col_offset + chunk_idx * npu_chunk_size
+                    chunk_offset = col_offset + chunk_idx * col_chunk_size
                     runtime_buffer.append(
                         f"   rt.drain({fifo_var}.cons(), {source}, "
                         f"wait=True, tap=TensorAccessPattern(tensor_dims=[{data_size},], "
-                        f"offset={chunk_offset}, sizes=[{npu_chunk_size},], strides=[1,]))"
+                        f"offset={chunk_offset}, sizes=[{col_chunk_size},], strides=[1,]))"
                     )
             
     #--------------Write to generated File---------------
@@ -511,8 +553,9 @@ f"""
     chunk_size = {min_chunk_size}\n""")
         
         python_file.write("""
+    max_chunk_size = 256
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
-    chunk_ty = np.ndarray[(chunk_size,), np.dtype[element_type]]
+    chunk_ty = np.ndarray[(max_chunk_size,), np.dtype[element_type]]
     col_ty = np.ndarray[(col_data_size,), np.dtype[element_type]]
     
     # Input/output specific types
@@ -602,16 +645,16 @@ def main():
     # Define external functions in a list
     external_functions = [
     {
-        'name': 'eltwise_add_bf16_scalar',
+        'name': 'eltwise_add_bf16_vector',
         'source_file': './add.cc',  # Relative to code_generation_backend folder
         'include_dirs': ['./'],      # Current directory for headers
-        'arg_types': '[chunk_ty, chunk_ty, chunk_ty, bfloat16]'  # inputA, inputB, output, size
+        #'arg_types': '[chunk_ty, chunk_ty, chunk_ty, bfloat16]'  # inputA, inputB, output, size
     },
     {
         'name': 'bf16_relu',
         'source_file': './relu.cc',  # Points to relu.cc in same folder
         'include_dirs': ['./'],       # Current directory
-        'arg_types': '[chunk_ty, chunk_ty, int]'  # input, output, size
+        #'arg_types': '[chunk_ty, chunk_ty, int]'  # input, output, size
     }
 ]
 
@@ -651,7 +694,7 @@ def main():
             add = f"A{col*2 + i +1}_B{col*2 + i +1}_worker"
             dataFlowGraph_aaa.add_node(add, placement=Placement(col, add_row), while_true=False, stack_size=1024,
                                    allocation_scheme='heap', trace=False, trace_events=None,
-                                   core_fn='eltwise_add_bf16_scalar', type='compute')
+                                   core_fn='eltwise_add_bf16_vector', type='compute')
 
             #Edges from mem to add node
             dataFlowGraph_aaa.add_edge(mem, add, depth=2, name=a_name_mem)
@@ -675,74 +718,12 @@ def main():
         dataFlowGraph_aaa.add_edge(mem, shim, depth=2, name=d_name)  # Connect back to the same shim
 
     # Generate the code
-    generated_file = generateIronCode(dataFlowGraph_aaa, 'add_relu_generated_design.py', external_functions)
+    generated_file = generateIronCode(dataFlowGraph_aaa, 'add_relu_generated_design.py', external_functions, data_size=1024)
     print(f"Generated IRON code at: {generated_file}")
-
-    #-------------Graph variant 2------------------------
-    # Create dataFlowGraph for add matmul
-    dataFlowGraph_amma = nx.MultiDiGraph()
-
-    # Add 4 shim nodes at row 0, columns 0-3
-    for col in range(4):
-        shim = f"shim_col{col}"
-        dataFlowGraph_amma.add_node(shim, placement=Placement(col, 0), type='shim')
-
-    # Four columns with 1 memory tile and 4 compute nodes
-    for col in range(4):
-        #Memory node at row 1, column col
-        mem = f"mem_col{col}"
-        dataFlowGraph_amma.add_node(mem, placement=Placement(col, 1), type='mem')
-
-        # Shim node for this column
-        shim = f"shim_col{col}"
-
-        # Add input edges from shim to memory (for inputs A and B)
-        a_name = f"SHIM_L3_L2_A{col*2+1}A{col*2+2}_col{col}"
-        b_name = f"SHIM_L3_L2_B{col*2+1}B{col*2+2}_col{col}"
-        dataFlowGraph_amma.add_edge(shim, mem, depth=2, name=a_name)
-        dataFlowGraph_amma.add_edge(shim, mem, depth=2, name=b_name)
-
-        # Define memory tile to compute tile edge names
-        a_name_mem = f"MEM_L2_L1_A{col*2+1}A{col*2+2}_col{col}"
-        b_name_mem = f"MEM_L2_L1_B{col*2+1}B{col*2+2}_col{col}"
-        d_name_mem = f"MEM_L1_L2_D{col*2+1}D{col*2+2}_col{col}"
-
-        # Per column 2 add workers and 2 matmul workers
-        for i in range(2):
-            #Add row 4 and 5 compute tiles (add)
-            add_row = 4 if i == 0 else 5
-            add = f"A{col*2 + i +1}_B{col*2 + i +1}_worker"
-            dataFlowGraph_amma.add_node(add, placement=Placement(col, add_row), while_true=False, stack_size=1024,
-                                   allocation_scheme='heap', trace=False, trace_events=None,
-                                   core_fn='eltwise_add_bf16_scalar', type='compute')
-
-            #Edges from mem to add node
-            dataFlowGraph_amma.add_edge(mem, add, depth=2, name=a_name_mem)
-            dataFlowGraph_amma.add_edge(mem, add, depth=2, name=b_name_mem)
-
-            #Add rows 2 and 3 compute tiles (matmul)
-            matmul_row = 2 if i == 0 else 3
-            matmul = f"C{col*2 + i +1}_worker"
-            dataFlowGraph_amma.add_node(matmul, placement=Placement(col, matmul_row), while_true=False, stack_size=1024,
-                                   allocation_scheme='heap', trace=False, trace_events=None,
-                                   core_fn='matmul_bf16', type='compute')
-
-            # Edge from add to matmul
-            dataFlowGraph_amma.add_edge(add, matmul, depth=2, name="L1_L1_elwiseadd_matmul")
-
-            #Edge from matmul to mem
-            dataFlowGraph_amma.add_edge(matmul, mem, depth=2, name=d_name_mem)
-
-        #Output from mem to shim
-        d_name = f"SHIM_L2_L3_D{col*2 +1}D{col*2 +2}_col{col}"
-        dataFlowGraph_amma.add_edge(mem, shim, depth=2, name=d_name)  # Connect back to the same shim
 
     # Generate the code
     generated_file = generateIronCode(dataFlowGraph_aaa, 'generated_design.py', external_functions=None, data_size=1024)
     print(f"Generated IRON code at: {generated_file}")
-
-    #generated_file = generateIronCode(dataFlowGraph_amma, 'add_matmul_generated_design.py', external_functions)
-    #print(f"Generated IRON code at: {generated_file}")
 
 if __name__ == "__main__":
     main()

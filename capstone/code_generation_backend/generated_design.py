@@ -18,8 +18,9 @@ def generated_design(inputA, inputB, outputD):
 
     chunk_size = 64
 
+    max_chunk_size = 256
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
-    chunk_ty = np.ndarray[(chunk_size,), np.dtype[element_type]]
+    chunk_ty = np.ndarray[(max_chunk_size,), np.dtype[element_type]]
     col_ty = np.ndarray[(col_data_size,), np.dtype[element_type]]
     
     # Input/output specific types
