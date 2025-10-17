@@ -1,5 +1,6 @@
 import networkx as nx
 from collections import defaultdict
+import re
 
 # Generator function that will take the dataFlowGraph and the new python file as arguments, 
 # will iterate through the graph nodes and edges, and write the corresponding IRON code to 
@@ -33,6 +34,8 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     external_buffer = []
     objectFifo_buffer = []
     runtime_buffer = []
+    split_join_buffer = []
+    internal_fifo_buffer = []
 
     # Maps for variables (to be able to reference later)
     tile_map = {}
@@ -41,6 +44,7 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     fifo_map = {}
     externalfn_map = {}
     fifo_name_map = {}
+    split_outputs = {}
 
     #----------Input and Output Sources-------------
     # Collect external inputs and outputs of program through shim tiles
@@ -51,10 +55,10 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
         data = dataFlowGraph.edges[prod, cons, key]
         name = data.get('name')
         source_part = name.split('_')[3][0] if len(name.split('_')) > 3 else name
-        if prod == 'shim':          # from shim is an input
+        if dataFlowGraph.nodes[prod].get('type') == 'shim': 
             inputs.add(source_part)
-        elif cons == 'shim':        # to shim is an output
-            outputs.add(source_part)    
+        elif dataFlowGraph.nodes[cons].get('type') == 'shim':  
+            outputs.add(source_part)
     sorted_inputs = sorted(inputs)
     sorted_outputs = sorted(outputs)
     # Create argument names for generated function (inputA, etc)
@@ -74,15 +78,30 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
         fifo_variable = f"of_from_{prod}_to_{cons}_{key}"
         fifo_map[(prod, cons, key)] = fifo_variable
         fifo_name_map[fifo_variable] = name
-        if prod == 'shim':
+        if dataFlowGraph.nodes[prod].get('type') == 'shim': 
             input_fifos[source_part].append(fifo_variable)
-        elif cons == 'shim':
+        elif dataFlowGraph.nodes[cons].get('type') == 'shim': 
             output_fifos[source_part].append(fifo_variable)
-
 
     # Get number of mem nodes (columns to parallelize across)
     mem_nodes = [node for node in dataFlowGraph.nodes() if dataFlowGraph.nodes[node].get('type') == 'mem']
     num_mem_nodes = len(mem_nodes)
+
+    # Calculate dynamic chunk sizes per column
+    col_data_sizes = {}
+    chunk_sizes = {}
+    for node in mem_nodes:
+        col_idx = dataFlowGraph.nodes[node]['placement'].column
+        col_data_size = data_size // num_mem_nodes
+        col_data_sizes[col_idx] = col_data_size
+        
+        # Count workers per column for this mem node
+        out_edges = list(dataFlowGraph.out_edges(node, keys=True))
+        worker_count = sum(1 for _, cons, key in out_edges 
+                        if (dataFlowGraph.nodes[cons].get('type') == 'compute' and
+                            dataFlowGraph.edges[node, cons, key]['name'].startswith('MEM_L2_L1')))
+        chunk_size = col_data_size // max(worker_count, 1)
+        chunk_sizes[col_idx] = chunk_size
 
     #----------Tile Definitions-------------------
     # Iterate through graph nodes to generate tile definitions
@@ -106,97 +125,155 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
         name = data.get('name', f"of_{prod}_to{cons}")
         #Hard coded extraction of source for data type reference
         source_part = name.split('_')[3][0] if len(name.split('_')) > 3 else name
-        #Handle data types
-        if source_part not in sorted_inputs + sorted_outputs:
-            data_ty = 'data_ty'
-        else:
-            data_ty = f"data_{source_part.lower()}_ty"
         fifo_variable = fifo_map[(prod, cons, key)]
         fifo_name_map[fifo_variable] = name
 
-        # Skip if edge involves mem (could be split or join (handled later))
-        if prod == 'mem' or cons == 'mem' or (dataFlowGraph.nodes[prod].get('type') == 'mem' and dataFlowGraph.nodes[cons].get('type') == 'compute') or (dataFlowGraph.nodes[prod].get('type') == 'compute' and dataFlowGraph.nodes[cons].get('type') == 'mem'):
-            continue
-
-        # attach objectFifos for shim to objectFifo buffer
-        if prod == 'shim' or cons == 'shim':
-            objectFifo_buffer.append(f"{fifo_variable} = ObjectFifo({data_ty}, depth={depth}, name='{name}')")
-        else:
-            objectFifo_buffer.append(f"{fifo_variable} = ObjectFifo({data_ty}, {tile_map[prod]}, {tile_map[cons]}, depth={depth}, name='{name}')")
-
+        # Only create base FIFOs for shim<->mem connections
+        if dataFlowGraph.nodes[prod].get('type') == 'shim' or dataFlowGraph.nodes[cons].get('type') == 'shim':
+            if source_part.lower() == 'a':
+                fifo_type = "data_a_ty"
+            elif source_part.lower() == 'b':
+                fifo_type = "data_b_ty"
+            elif source_part.lower() == 'd':
+                fifo_type = "data_d_ty"
+            else:
+                fifo_type = "data_ty"
+            # Assign placement to shim tile
+            shim_tile = tile_map[prod] if dataFlowGraph.nodes[prod].get('type') == 'shim' else tile_map[cons]
+            objectFifo_buffer.append(f"{fifo_variable} = ObjectFifo({fifo_type}, depth={depth}, name='{name}')")
+    
     #------------Memory Node split and join-------------
     # Split and join on mem nodes (L2 to L1) and (L1 to L2)
     for node in dataFlowGraph.nodes():
-        attributes = dataFlowGraph.nodes[node]
-        if attributes.get('type') == 'mem':
+        if dataFlowGraph.nodes[node].get('type') == 'mem':
+            attributes = dataFlowGraph.nodes[node]
+            col_idx = attributes['placement'].column
+            tile_var = tile_map[node]
             in_edges = list(dataFlowGraph.in_edges(node, keys=True))
             out_edges = list(dataFlowGraph.out_edges(node, keys=True))
-            col = attributes['placement'].column + 1
+            col_data_size = col_data_sizes[col_idx]
+            chunk_size = chunk_sizes[col_idx]
+            col_offset = col_idx * col_data_size
 
             # Process input edges (from shim through memory tiles to compute tiles)
             for pred, _, key in in_edges:
-                if pred == 'shim':
+                if dataFlowGraph.nodes[pred].get('type') == 'shim':  # FIXED: Check node type
                     fifo_var = fifo_map[(pred, node, key)]
                     name = fifo_name_map[fifo_var]
-                    col_str = name.split('_')[-1]
-                    col = int(col_str[3:])
                     source_part = name.split('_')[3][0] if len(name.split('_')) > 3 else name
-                    data_ty = f"data_{source_part.lower()}_ty"
                     
-                    # Count splits based on output edges with matching source names 
-                    out_source_parts = [ dataFlowGraph.edges[node, cons, k]['name'].split('_')[3][0] if len(dataFlowGraph.edges[node, cons, k]['name'].split('_')) > 3 else '' for _, cons, k in out_edges ]
-                    num_splits = len([1 for os in out_source_parts if os == source_part])
+                    # Count workers that need this input data
+                    num_workers = sum(1 for _, cons, k in out_edges 
+                                    if (dataFlowGraph.nodes[cons].get('type') == 'compute' and
+                                        dataFlowGraph.edges[node, cons, k]['name'].startswith('MEM_L2_L1') and
+                                        len(dataFlowGraph.edges[node, cons, k]['name'].split('_')) > 3 and
+                                        dataFlowGraph.edges[node, cons, k]['name'].split('_')[3][0] == source_part))
                     
-                    # Handle split size and offset
-                    chunk_size = data_size / (num_mem_nodes * num_splits)
-                    offset_base = (col - 1) * num_splits * chunk_size
-                    offsets = [offset_base + chunk_size * (i + 1) for i in range(num_splits)]
-                    split_var = f"split_of_from_{node}_to_worker_{source_part}_key"
-                    
-                    #Generate split operation
-                    objectFifo_buffer.append(
-                        f"{split_var} = {fifo_var}.cons().split(offsets=[{', '.join(map(str, offsets))}], obj_type={data_ty}, depth=2, name='{split_var}', placement={tile_map[node]})")
-                    
-                    #Update fifo mappings for output edges
-                    for _, cons, k in out_edges:
-                        out_name = dataFlowGraph.edges[node, cons, k]['name']
-                        out_source_part = out_name.split('_')[3][0] if len(out_name.split('_')) > 3 else ''
-                        if out_name.startswith('MEM_L2_L1') and source_part == out_source_part:
-                            fifo_map[(node, cons, k)] = split_var
-                            fifo_name_map[split_var] = out_name
-            
+                    if num_workers > 0:
+                        offsets = [i * chunk_size for i in range(num_workers)]
+                        split_var_base = f"split_{node}_{source_part}"
+                        
+                        # Create ONE split operation for all sub-FIFOs
+                        offsets_str = ', '.join(map(str, offsets))
+                        split_join_buffer.append(
+                            f"{split_var_base} = {fifo_var}.cons().split("
+                            f"offsets=[{offsets_str}], "
+                            f"obj_types=[chunk_ty] * {num_workers}, "
+                            f"depths=[2] * {num_workers}, "
+                            f"names=[f'{split_var_base}_{{i}}' for i in range({num_workers})], "
+                            f"placement={tile_var})"
+                        )
+
+                        # Track which compute nodes connect to which split index
+                        split_consumers = []
+                        consumer_idx = 0
+                        for _, cons, k in out_edges:
+                            edge_name = dataFlowGraph.edges[node, cons, k]['name']
+                            if (edge_name.startswith('MEM_L2_L1') and 
+                                len(edge_name.split('_')) > 3 and 
+                                edge_name.split('_')[3][0] == source_part):
+                                split_consumers.append((cons, consumer_idx))
+                                consumer_idx += 1
+                        
+                        # Store for worker connections
+                        split_outputs[(node, source_part)] = {
+                            'var': split_var_base,
+                            'num_workers': num_workers,
+                            'offsets': offsets,
+                            'chunk_size': chunk_size,
+                            'consumers': split_consumers
+                        }
+
             # Process output edges (joining data from compute tiles through mem tile to shim tile)
             for _, succ, key in out_edges:
-                if succ == 'shim':
-                    fifo_var = fifo_map[(node, cons, key)]
+                if dataFlowGraph.nodes[succ].get('type') == 'shim':  # FIXED: Check node type
+                    fifo_var = fifo_map[(node, succ, key)]
                     name = fifo_name_map[fifo_var]
-                    col_str = name.split('_')[-1]
-                    col = int(col_str[3:])
                     source_part = name.split('_')[3][0] if len(name.split('_')) > 3 else name
-                    data_ty = f"data_{source_part.lower()}_ty"
                     
-                    #Count joins based on input edges with matching sources
-                    in_source_parts = [ dataFlowGraph.edges[prod, node, k]['name'].split('_')[3][0] if len(dataFlowGraph.edges[prod, node, k]['name'].split('_')) > 3 else '' for prod, _, k in in_edges ]
-                    num_joins = len([1 for is_ in in_source_parts if is_ == source_part])
+                    num_workers = sum(1 for prod, _, k in in_edges 
+                                    if (dataFlowGraph.nodes[prod].get('type') == 'compute' and  # FIXED: Check node type
+                                        dataFlowGraph.edges[prod, node, k]['name'].startswith('MEM_L1_L2') and
+                                        len(dataFlowGraph.edges[prod, node, k]['name'].split('_')) > 3 and
+                                        dataFlowGraph.edges[prod, node, k]['name'].split('_')[3][0] == source_part))
+                    
+                    if num_workers > 0:
+                        offsets = [col_offset + i * chunk_size for i in range(num_workers)]
+                        join_var_base = f"join_{node}_{source_part}"
+                        
+                        # Create ONE join operation for all sub-FIFOs
+                        offsets_str = ', '.join(map(str, offsets))
+                        split_join_buffer.append(
+                            f"{join_var_base} = {fifo_var}.prod().join("
+                            f"offsets=[{offsets_str}], "
+                            f"obj_types=[chunk_ty] * {num_workers}, "
+                            f"depths=[2] * {num_workers}, "
+                            f"names=[f'{join_var_base}_{{i}}' for i in range({num_workers})], "
+                            f"placement={tile_var})"
+                        )
 
-                    # Handle join size and offset
-                    chunk_size = data_size / (num_mem_nodes * num_joins)
-                    offset_base = (col - 1) * num_joins * chunk_size
-                    offsets = [offset_base + chunk_size * (i + 1) for i in range(num_joins)]
-                    join_var = f"join_of_from_worker_{node}_to_{source_part}_key"
-                    
-                    #Generate join operation
-                    objectFifo_buffer.append(
-                        f"{join_var} = {fifo_var}.prod().join(obj_type={data_ty}, depth=2, name='{join_var}', placement={tile_map[node]})")
-                    
-                    # Update fifo mappings for input edges
-                    for prod, _, k in in_edges:
-                        in_name = dataFlowGraph.edges[prod, node, k]['name']
-                        in_source_part = in_name.split('_')[3][0] if len(in_name.split('_')) > 3 else ''
-                        if in_name.startswith('MEM_L1_L2') and source_part == in_source_part:
-                            fifo_map[(prod, node, k)] = join_var
-                            fifo_name_map[join_var] = in_name
+                        # Track which compute nodes contribute to which join index - FIXED: Move inside if block
+                        join_producers = []
+                        producer_idx = 0
+                        for prod, _, k in in_edges:
+                            edge_name = dataFlowGraph.edges[prod, node, k]['name']
+                            if (edge_name.startswith('MEM_L1_L2') and 
+                                len(edge_name.split('_')) > 3 and 
+                                edge_name.split('_')[3][0] == source_part):
+                                join_producers.append((prod, producer_idx))
+                                producer_idx += 1
+                        
+                        # Store for worker connections
+                        split_outputs[(node, source_part, 'join')] = {
+                            'var': join_var_base,
+                            'num_workers': num_workers,
+                            'offsets': offsets,
+                            'chunk_size': chunk_size,
+                            'producers': join_producers
+                        }
 
+    # ------------Internal ObjectFifo Definitions (compute->compute and compute->mem only)-------------
+    # Generate internal FIFOs after splits are defined, but skip mem->compute (handled by split refs)
+    for prod, cons, key in dataFlowGraph.edges(keys=True):
+        data = dataFlowGraph.edges[prod, cons, key]
+        depth = data.get('depth', 2)
+        name = data.get('name')
+        fifo_variable = fifo_map[(prod, cons, key)]
+        
+        # Skip shim<->mem and mem->compute (handled by splits/joins)
+        if ((dataFlowGraph.nodes[prod].get('type') == 'shim' and cons in mem_nodes) or 
+            (dataFlowGraph.nodes[cons].get('type') == 'shim' and prod in mem_nodes) or
+            (dataFlowGraph.nodes[prod].get('type') == 'mem' and 
+            dataFlowGraph.nodes[cons].get('type') == 'compute')):
+            continue
+        
+        # Only create for compute->compute and compute->mem connections
+        if dataFlowGraph.nodes[prod].get('type') == 'compute':
+            unique_suffix = f"{prod}_{cons}_{key}"
+            fifo_type = "chunk_ty"
+            internal_fifo_buffer.append(
+                f"{fifo_variable} = ObjectFifo({fifo_type}, depth={depth}, name='{name}_{unique_suffix}')"
+            )
 
     #--------------------Compute Nodes-------------
     # Process compute nodes
@@ -204,22 +281,19 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     for node in dataFlowGraph.nodes():
         attributes = dataFlowGraph.nodes[node]
         tile_type = attributes.get('type')
-        if( tile_type == 'compute'):
-            #Compute node attributes
+        if tile_type == 'compute':
             core_fn = attributes.get('core_fn')
-            while_true = attributes.get('while_true')
-            stack_size = attributes.get('stack_size')
-            allocation_scheme = attributes.get('allocation_scheme')
-            trace = attributes.get('trace')
-            trace_events = attributes.get('trace_events')
+            while_true = attributes.get('while_true', False)
+            stack_size = attributes.get('stack_size', 1024)
+            allocation_scheme = attributes.get('allocation_scheme', 'heap')
+            trace = attributes.get('trace', False)
+            trace_events = attributes.get('trace_events', None)
 
-            #check if core_fn is external function in list
             external_function_def = next((fn for fn in external_functions if fn['name'] == core_fn), None)
             in_edges = list(dataFlowGraph.in_edges(node, keys=True))
             out_edges = list(dataFlowGraph.out_edges(node, keys=True))
 
-            #Core function definition buffers
-            function_name = f"core_fn_{node}"
+            function_name = f"core_fn_{node.replace('_', '')}"
             function_parameters = []
             in_acquires = []
             in_releases = []
@@ -237,7 +311,22 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
                 in_acquires.append(f"    {element} = {of_variable}.acquire(1)")
                 in_releases.append(f"    {of_variable}.release(1)")
                 call_args.append(element)
-                worker_args.append(f"{fifo_var}.cons()")
+                
+                # Handle split FIFO connections from memory
+                if dataFlowGraph.nodes[pred].get('type') == 'mem':
+                    source_part = dataFlowGraph.edges[pred, node, key]['name'].split('_')[3][0]
+                    split_key = (pred, source_part)
+                    if split_key in split_outputs:
+                        split_info = split_outputs[split_key]
+                        consumer_entry = next((entry for entry in split_info['consumers'] if entry[0] == node), None)
+                        if consumer_entry:
+                            split_idx = consumer_entry[1]
+                            # Reference the split sub-FIFO using index notation
+                            worker_args.append(f"{split_info['var']}[{split_idx}].cons()")
+                            continue
+                    worker_args.append(f"{fifo_var}.cons()")
+                else:
+                    worker_args.append(f"{fifo_var}.cons()")
 
             #Iterates through outgoing edges to generate parameters and acquire/release
             for j, (_, succ, key) in enumerate(out_edges):
@@ -248,7 +337,21 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
                 out_acquires.append(f"    {elem} = {of_variable}.acquire(1)")
                 out_releases.append(f"    {of_variable}.release(1)")
                 call_args.append(elem)
-                worker_args.append(f"{fifo_var}.prod()")
+                
+                # Handle connections to memory joins
+                if dataFlowGraph.nodes[succ].get('type') == 'mem':
+                    source_part = dataFlowGraph.edges[node, succ, key]['name'].split('_')[3][0]
+                    join_key = (succ, source_part, 'join')
+                    if join_key in split_outputs:
+                        join_info = split_outputs[join_key]
+                        producer_entry = next((entry for entry in join_info['producers'] if entry[0] == node), None)
+                        if producer_entry:
+                            join_idx = producer_entry[1]
+                            worker_args.append(f"{join_info['var']}[{join_idx}].prod()")
+                            continue
+                    worker_args.append(f"{fifo_var}.prod()")
+                else:
+                    worker_args.append(f"{fifo_var}.prod()")
 
             #----------------External Functions----------------
             #Generate external function if core_fn is external
@@ -256,16 +359,16 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
                 source_file = external_function_def['source_file']
                 include_dirs = external_function_def['include_dirs']
                 num_arguments = len(in_edges) + len(out_edges)
-                argument_types = external_function_def.get('arg_types', f"[data_ty] * {num_arguments}")
+                argument_types = external_function_def.get('arg_types', f"[chunk_ty] * {num_arguments}")
 
                 #generate ExternalFunction object
-                external_variable = f"external_{node}"
+                external_variable = f"external_{node.replace('_', '')}"
                 external_buffer.append(
-                    f"{external_variable} = ExternalFunction(\n"
-                    f"    name=\"{core_fn}\",\n"
-                    f"    source_file=\"{source_file}\",\n"
-                    f"    arg_types={argument_types},\n"
-                    f"    include_dirs={include_dirs}\n"
+                    f"{external_variable} = ExternalFunction("
+                    f"name=\"{core_fn}\", "
+                    f"source_file=\"{source_file}\", "
+                    f"arg_types={argument_types}, "
+                    f"include_dirs={include_dirs}"
                     f")"
                 )
 
@@ -278,7 +381,14 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
                 corefn_buffer.append(f"def {function_name}({', '.join(function_parameters)}):")
                 for line in in_acquires + out_acquires:
                     corefn_buffer.append(f"{line}")
-                corefn_buffer.append(f"    {external_variable}({', '.join(call_args)})")
+
+                # Add the 4th argument for external function call
+                if len(call_args) == 3:  # For add and relu functions
+                    call_args_with_size = call_args + [f"bfloat16(chunk_size)"]  # or bfloat16(1.0)
+                else:
+                    call_args_with_size = call_args
+                
+                corefn_buffer.append(f"    {external_variable}({', '.join(call_args_with_size)})")
                 for line in in_releases + out_releases:
                     corefn_buffer.append(f"{line}")
 
@@ -289,21 +399,34 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
                 corefn_buffer.append(f"def {function_name}({', '.join(function_parameters)}):")
                 for line in in_acquires + out_acquires:
                     corefn_buffer.append(f"{line}")
+
                 if core_fn == 'eltwise_add_bf16_scalar':
-                    corefn_buffer.append(f"    for i in range(len({call_args[0]})):")
+                    # Assumes 2 inputs (A, B) and 1 output (C)
+                    # Get shape from first input MemRef
+                    corefn_buffer.append(f"    n = {call_args[0]}.shape[0]  # Get length from MemRef shape")
+                    corefn_buffer.append(f"    print(f'DEBUG: {function_name} processing {{n}} elements')")
+                    corefn_buffer.append(f"    for i in range(n):")
                     corefn_buffer.append(f"        {call_args[2]}[i] = {call_args[0]}[i] + {call_args[1]}[i]")
+                    # Debug first element
+                    #orefn_buffer.append(f"    if n > 0:")
+                    corefn_buffer.append(f"        print(f'DEBUG: {function_name} first: {{ {call_args[0]}[0] }} + {{ {call_args[1]}[0] }} = {{ {call_args[2]}[0] }}')")
                 elif core_fn == 'bf16_relu':
-                    corefn_buffer.append(f"    for i in range(len({call_args[0]})):")
-                    corefn_buffer.append(f"        {call_args[1]}[i] = max(0, {call_args[0]}[i])")
+                    corefn_buffer.append(f"    n = {call_args[0]}.shape[0]")
+                    corefn_buffer.append(f"    print(f'DEBUG: {function_name} processing {{n}} elements')")
+                    corefn_buffer.append(f"    zero = 0.0")
+                    corefn_buffer.append(f"    for i in range(n):")
+                    # Use max instead of conditional
+                    corefn_buffer.append(f"        {call_args[1]}[i] = {call_args[0]}[i] if {call_args[0]}[i] > zero else zero")
                 else:
                     raise ValueError(f"Unknown core_fn: {core_fn}")
+                
                 for line in in_releases + out_releases:
-                    corefn_buffer.append(f"{line}")
+                    corefn_buffer.append(line)
 
             #----------------Workers-------------------------
             # write worker generated code to worker_buffer
             # define workers to execute core functions on specific tiles
-            worker_variable = f"worker_{node}"
+            worker_variable = f"worker_{node.replace('_', '')}"
             worker_buffer.append(
                 f"{worker_variable} = Worker({function_name}, [{', '.join(worker_args)}], "
                 f"placement={tile_map[node]}, while_true={while_true}, stack_size={stack_size}, "
@@ -316,29 +439,47 @@ def generateIronCode(dataFlowGraph: nx.MultiDiGraph, filepath: str, external_fun
     runtime_buffer.append("rt = Runtime()")
     seq_types = ', '.join([f"data_{source.lower()}_ty" for source in sequential_variables])
     runtime_buffer.append(f"with rt.sequence({seq_types}) as ({','.join(sequential_variables)}):")
-    runtime_buffer.append(f"   Workers = [" + ', '.join(worker_map.values()) + "]")
+    runtime_buffer.append(f"   Workers = [" + ', '.join([f'{w}' for w in worker_map.values()]) + "]")
     runtime_buffer.append("   rt.start(*Workers)")
+        
+    npu_chunk_size = chunk_size
     
     # Generate data movement for input FIFOs (rt.fills)
     for source, fifos in input_fifos.items():
         for fifo_var in fifos:
             name = fifo_name_map[fifo_var]
-            col_str = name.split('_')[-1]
-            col = int(col_str[3:])
-            offset = (data_size / 4) * col
-            runtime_buffer.append(
-                f"   rt.fill(in_fifo={fifo_var}.prod(), in_data={source}, tap=TensorAccessPattern(tensor_dims=[1,1024], offset={offset}, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))")
-    
+            col_match = re.search(r'col(\d+)', name)
+            if col_match:
+                col = int(col_match.group(1))  
+                col_offset = col * col_data_size  
+                num_chunks = col_data_size // npu_chunk_size
+                
+                for chunk_idx in range(num_chunks):
+                    chunk_offset = col_offset + chunk_idx * npu_chunk_size
+                    runtime_buffer.append(
+                        f"   rt.fill({fifo_var}.prod(), {source}, "
+                        f"tap=TensorAccessPattern(tensor_dims=[{data_size},], "
+                        f"offset={chunk_offset}, sizes=[{npu_chunk_size},], strides=[1,]))"
+                    )
+            
     # Generate data movement for output FIFOs (rt.drains)
     for source, fifos in output_fifos.items():
         for fifo_var in fifos:
             name = fifo_name_map[fifo_var]
-            col_str = name.split('_')[-1]
-            col = int(col_str[3:])
-            offset = (data_size / 4) * col
-            runtime_buffer.append(
-                f"   rt.drain(out_fifo={fifo_var}.cons(), out_data={source}, tap=TensorAccessPattern(tensor_dims=[1,1024], offset={offset}, sizes=[1024, (data_size/4)/1024], strides=[1, 1024]))")
-
+            col_match = re.search(r'col(\d+)', name)
+            if col_match:
+                col = int(col_match.group(1))  # FIXED: Don't subtract 1
+                col_offset = col * col_data_size
+                num_chunks = col_data_size // npu_chunk_size
+                
+                for chunk_idx in range(num_chunks):
+                    chunk_offset = col_offset + chunk_idx * npu_chunk_size
+                    runtime_buffer.append(
+                        f"   rt.drain({fifo_var}.cons(), {source}, "
+                        f"wait=True, tap=TensorAccessPattern(tensor_dims=[{data_size},], "
+                        f"offset={chunk_offset}, sizes=[{npu_chunk_size},], strides=[1,]))"
+                    )
+            
     #--------------Write to generated File---------------
     # open file and write all generated code to the output file
     with open(filepath, 'w') as python_file:
@@ -356,11 +497,25 @@ from aie.helpers.taplib import TensorAccessPattern
             
             
 @iron.jit(is_placed=False)
-def generated_design(""" + ", ".join(argument_names) + """):
-
+def generated_design(""" + ", ".join(argument_names) + """):\n""")
+        python_file.write(
+f"""
     element_type = bfloat16
-    data_size = """ + (f"{first_input}.numel()" if first_input else "0") + """
+    data_size = {first_input}.numel() if {first_input} else 0
+    num_mem_nodes = {num_mem_nodes}
+    col_data_size = data_size // num_mem_nodes\n""")
+        min_chunk_size = min(chunk_sizes.values()) if chunk_sizes else (data_size // num_mem_nodes // 2)
+        
+        python_file.write(
+f"""
+    chunk_size = {min_chunk_size}\n""")
+        
+        python_file.write("""
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
+    chunk_ty = np.ndarray[(chunk_size,), np.dtype[element_type]]
+    col_ty = np.ndarray[(col_data_size,), np.dtype[element_type]]
+    
+    # Input/output specific types
     data_a_ty = np.ndarray[(data_size,), np.dtype[element_type]]
     data_b_ty = np.ndarray[(data_size,), np.dtype[element_type]]
     data_d_ty = np.ndarray[(data_size,), np.dtype[element_type]]
@@ -372,9 +527,19 @@ def generated_design(""" + ", ".join(argument_names) + """):
         for line in tile_buffer:
             python_file.write("    " + line + '\n')
 
-        # write objectFifo_buffer to file
-        python_file.write("\n    # Define object FIFOs for data streaming between tiles\n")
+        # write base objectFifo_buffer to file
+        python_file.write("\n    # Define base object FIFOs for shim <-> memory connections\n")
         for line in objectFifo_buffer:
+            python_file.write("    " + line + '\n')
+
+        # write split_join_buffer FIRST (before internal FIFOs)
+        python_file.write("\n    # Split/Join operations on memory tiles\n")
+        for line in split_join_buffer:
+            python_file.write("    " + line + '\n')
+
+        # write internal_fifo_buffer to file
+        python_file.write("\n    # Define internal object FIFOs (compute->compute, compute->mem)\n")
+        for line in internal_fifo_buffer:
             python_file.write("    " + line + '\n')
 
         # write externalfn_buffer to file
@@ -411,76 +576,73 @@ def main():
         
         # write input and output sources to file
         for source in sorted_inputs:
-            if source == 'A':
-                python_file.write(f"    input{source} = iron.rand(data_size, dtype=datatype, device=\"npu\")\n")
-            elif source == 'B':
-                python_file.write(f"    input{source} = iron.arange(data_size, dtype=datatype, device=\"npu\", step=-1)\n")
+            python_file.write(f"    input{source} = iron.rand(data_size, dtype=datatype, device=\"npu\")\n")
         for source in sorted_outputs:
             python_file.write(f"    output{source} = iron.zeros(data_size, dtype=datatype, device=\"npu\")\n")
-        python_file.write(f"    generated_design({', '.join(argument_names)})\n")
+        python_file.write(f"    program = generated_design({', '.join(argument_names)})\n")
+        python_file.write("    program()\n")
+        
         for source in sorted_outputs:
-            python_file.write(f"    print(output{source})\n")
+            python_file.write(f"    print(iron.to_numpy(output{source}))\n")
 
-        # call main function
-        python_file.write("""if __name__ == "__main__":
+        python_file.write(
+            """if __name__ == "__main__":
     main()
-""")
+"""
+        )
         # close file and return
         return filepath
     
-#-------------Example main that creates an example graph and calls generateIronCode
+#---------main function---------------
 def main():
-    #
     import networkx as nx
     from collections import namedtuple
     Placement = namedtuple('Placement', ['column', 'row'])
 
     # Define external functions in a list
     external_functions = [
-        {
-            'name': 'eltwise_add_bf16_scalar',
-            'source_file': '../../../aie_kernels/aie2/add.cc',
-            'include_dirs': ['/scratch/andrewa/mlir-aie/aie_kernels/'],
-            'arg_types': '[data_ty] * 3'  
-        },
-        {
-            'name': 'bf16_relu',
-            'source_file': '../../../aie_kernels/aie2/relu.cc',
-            'include_dirs': ['/scratch/andrewa/mlir-aie/aie_kernels/'],
-            'arg_types': '[data_ty] * 2'
-        },
-        {
-            'name': 'matmul_bf16',
-            'source_file': '../../../aie_kernels/aie2/matmul.cc',
-            'include_dirs': ['/scratch/andrewa/mlir-aie/aie_kernels/'],
-            'arg_types': '[data_ty] * 3' 
-        }
-    ]
+    {
+        'name': 'eltwise_add_bf16_scalar',
+        'source_file': './add.cc',  # Relative to code_generation_backend folder
+        'include_dirs': ['./'],      # Current directory for headers
+        'arg_types': '[chunk_ty, chunk_ty, chunk_ty, bfloat16]'  # inputA, inputB, output, size
+    },
+    {
+        'name': 'bf16_relu',
+        'source_file': './relu.cc',  # Points to relu.cc in same folder
+        'include_dirs': ['./'],       # Current directory
+        'arg_types': '[chunk_ty, chunk_ty, int]'  # input, output, size
+    }
+]
 
     #---------Graph variant 1-----------
     # Create dataFlowGraph for add relu
     dataFlowGraph_aaa = nx.MultiDiGraph()
 
-    # Add shim node at (0,0)
-    dataFlowGraph_aaa.add_node('shim', placement=Placement(0, 0), type='shim')
+    # Add 4 shim nodes at row 0, columns 0-3
+    for col in range(4):
+        shim = f"shim_col{col}"
+        dataFlowGraph_aaa.add_node(shim, placement=Placement(col, 0), type='shim')
 
     # Four columns with 1 memory tile and 4 compute nodes
     for col in range(4):
-        #Memory node at (0,1), (1,1), (2,1), (3,1)
-        mem = f"mem_col{col+1}"
+        #Memory node at row 1, column col
+        mem = f"mem_col{col}"
         dataFlowGraph_aaa.add_node(mem, placement=Placement(col, 1), type='mem')
 
+        # Shim node for this column
+        shim = f"shim_col{col}"
 
         # Add input edges from shim to memory (for inputs A and B)
-        a_name = f"SHIM_L3_L2_A{col*2+1}A{col*2+2}_col{col+1}"
-        b_name = f"SHIM_L3_L2_B{col*2+1}B{col*2+2}_col{col+1}"
-        dataFlowGraph_aaa.add_edge('shim', mem, depth=2, name=a_name)
-        dataFlowGraph_aaa.add_edge('shim', mem, depth=2, name=b_name)
+        a_name = f"SHIM_L3_L2_A{col*2+1}A{col*2+2}_col{col}"
+        b_name = f"SHIM_L3_L2_B{col*2+1}B{col*2+2}_col{col}"
+        dataFlowGraph_aaa.add_edge(shim, mem, depth=2, name=a_name)
+        dataFlowGraph_aaa.add_edge(shim, mem, depth=2, name=b_name)
 
         # Define memory tile to compute tile edge names
-        a_name_mem = f"MEM_L2_L1_A{col*2+1}A{col*2+2}_col{col+1}"
-        b_name_mem = f"MEM_L2_L1_B{col*2+1}B{col*2+2}_col{col+1}"
-        d_name_mem = f"MEM_L1_L2_D{col*2+1}D{col*2+2}_col{col+1}"
+        a_name_mem = f"MEM_L2_L1_A{col*2+1}A{col*2+2}_col{col}"
+        b_name_mem = f"MEM_L2_L1_B{col*2+1}B{col*2+2}_col{col}"
+        d_name_mem = f"MEM_L1_L2_D{col*2+1}D{col*2+2}_col{col}"
 
         # Per column 2 add workers and 2 relu workers
         for i in range(2):
@@ -509,8 +671,8 @@ def main():
             dataFlowGraph_aaa.add_edge(relu, mem, depth=2, name=d_name_mem)
 
         #Output from mem to shim
-        d_name = f"SHIM_L2_L3_D{col*2 +1}D{col*2 +2}_col{col+1}"
-        dataFlowGraph_aaa.add_edge(mem, 'shim', depth=2, name=d_name)
+        d_name = f"SHIM_L2_L3_D{col*2 +1}D{col*2 +2}_col{col}"
+        dataFlowGraph_aaa.add_edge(mem, shim, depth=2, name=d_name)  # Connect back to the same shim
 
     # Generate the code
     generated_file = generateIronCode(dataFlowGraph_aaa, 'add_relu_generated_design.py', external_functions)
@@ -520,26 +682,30 @@ def main():
     # Create dataFlowGraph for add matmul
     dataFlowGraph_amma = nx.MultiDiGraph()
 
-    # Add shim node at (0,0)
-    dataFlowGraph_amma.add_node('shim', placement=Placement(0, 0), type='shim')
+    # Add 4 shim nodes at row 0, columns 0-3
+    for col in range(4):
+        shim = f"shim_col{col}"
+        dataFlowGraph_amma.add_node(shim, placement=Placement(col, 0), type='shim')
 
     # Four columns with 1 memory tile and 4 compute nodes
     for col in range(4):
-        #Memory node at (0,1), (1,1), (2,1), (3,1)
-        mem = f"mem_col{col+1}"
+        #Memory node at row 1, column col
+        mem = f"mem_col{col}"
         dataFlowGraph_amma.add_node(mem, placement=Placement(col, 1), type='mem')
 
+        # Shim node for this column
+        shim = f"shim_col{col}"
 
         # Add input edges from shim to memory (for inputs A and B)
-        a_name = f"SHIM_L3_L2_A{col*2+1}A{col*2+2}_col{col+1}"
-        b_name = f"SHIM_L3_L2_B{col*2+1}B{col*2+2}_col{col+1}"
-        dataFlowGraph_amma.add_edge('shim', mem, depth=2, name=a_name)
-        dataFlowGraph_amma.add_edge('shim', mem, depth=2, name=b_name)
+        a_name = f"SHIM_L3_L2_A{col*2+1}A{col*2+2}_col{col}"
+        b_name = f"SHIM_L3_L2_B{col*2+1}B{col*2+2}_col{col}"
+        dataFlowGraph_amma.add_edge(shim, mem, depth=2, name=a_name)
+        dataFlowGraph_amma.add_edge(shim, mem, depth=2, name=b_name)
 
         # Define memory tile to compute tile edge names
-        a_name_mem = f"MEM_L2_L1_A{col*2+1}A{col*2+2}_col{col+1}"
-        b_name_mem = f"MEM_L2_L1_B{col*2+1}B{col*2+2}_col{col+1}"
-        d_name_mem = f"MEM_L1_L2_D{col*2+1}D{col*2+2}_col{col+1}"
+        a_name_mem = f"MEM_L2_L1_A{col*2+1}A{col*2+2}_col{col}"
+        b_name_mem = f"MEM_L2_L1_B{col*2+1}B{col*2+2}_col{col}"
+        d_name_mem = f"MEM_L1_L2_D{col*2+1}D{col*2+2}_col{col}"
 
         # Per column 2 add workers and 2 matmul workers
         for i in range(2):
@@ -568,14 +734,15 @@ def main():
             dataFlowGraph_amma.add_edge(matmul, mem, depth=2, name=d_name_mem)
 
         #Output from mem to shim
-        d_name = f"SHIM_L2_L3_D{col*2 +1}D{col*2 +2}_col{col+1}"
-        dataFlowGraph_amma.add_edge(mem, 'shim', depth=2, name=d_name)
+        d_name = f"SHIM_L2_L3_D{col*2 +1}D{col*2 +2}_col{col}"
+        dataFlowGraph_amma.add_edge(mem, shim, depth=2, name=d_name)  # Connect back to the same shim
 
     # Generate the code
-    generated_file = generateIronCode(dataFlowGraph_amma, 'add_matmul_generated_design.py', external_functions)
+    generated_file = generateIronCode(dataFlowGraph_aaa, 'generated_design.py', external_functions=None, data_size=1024)
     print(f"Generated IRON code at: {generated_file}")
 
+    #generated_file = generateIronCode(dataFlowGraph_amma, 'add_matmul_generated_design.py', external_functions)
+    #print(f"Generated IRON code at: {generated_file}")
 
-#---------main function---------------
 if __name__ == "__main__":
     main()

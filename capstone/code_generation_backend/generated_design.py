@@ -12,13 +12,25 @@ from aie.helpers.taplib import TensorAccessPattern
 def generated_design(inputA, inputB, outputD):
 
     element_type = bfloat16
-    data_size = inputA.numel()
+    data_size = inputA.numel() if inputA else 0
+    num_mem_nodes = 4
+    col_data_size = data_size // num_mem_nodes
+
+    chunk_size = 64
+
     data_ty = np.ndarray[(data_size,), np.dtype[element_type]]
+    chunk_ty = np.ndarray[(chunk_size,), np.dtype[element_type]]
+    col_ty = np.ndarray[(col_data_size,), np.dtype[element_type]]
+    
+    # Input/output specific types
     data_a_ty = np.ndarray[(data_size,), np.dtype[element_type]]
     data_b_ty = np.ndarray[(data_size,), np.dtype[element_type]]
     data_d_ty = np.ndarray[(data_size,), np.dtype[element_type]]
     # Define tiles for compute and shim nodes
     tile_0_0 = Tile(0, 0)
+    tile_1_0 = Tile(1, 0)
+    tile_2_0 = Tile(2, 0)
+    tile_3_0 = Tile(3, 0)
     tile_0_1 = Tile(0, 1)
     tile_0_4 = Tile(0, 4)
     tile_0_2 = Tile(0, 2)
@@ -40,298 +52,313 @@ def generated_design(inputA, inputB, outputD):
     tile_3_5 = Tile(3, 5)
     tile_3_3 = Tile(3, 3)
 
-    # Define object FIFOs for data streaming between tiles
-    of_from_shim_to_mem_col1_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A1A2_col1')
-    of_from_shim_to_mem_col1_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B1B2_col1')
-    of_from_shim_to_mem_col2_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A3A4_col2')
-    of_from_shim_to_mem_col2_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B3B4_col2')
-    of_from_shim_to_mem_col3_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A5A6_col3')
-    of_from_shim_to_mem_col3_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B5B6_col3')
-    of_from_shim_to_mem_col4_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A7A8_col4')
-    of_from_shim_to_mem_col4_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B7B8_col4')
-    of_from_mem_col1_to_shim_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D1D2_col1')
-    of_from_A1_B1_worker_to_C1_worker_0 = ObjectFifo(data_ty, tile_0_4, tile_0_2, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_A2_B2_worker_to_C2_worker_0 = ObjectFifo(data_ty, tile_0_5, tile_0_3, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_mem_col2_to_shim_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D3D4_col2')
-    of_from_A3_B3_worker_to_C3_worker_0 = ObjectFifo(data_ty, tile_1_4, tile_1_2, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_A4_B4_worker_to_C4_worker_0 = ObjectFifo(data_ty, tile_1_5, tile_1_3, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_mem_col3_to_shim_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D5D6_col3')
-    of_from_A5_B5_worker_to_C5_worker_0 = ObjectFifo(data_ty, tile_2_4, tile_2_2, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_A6_B6_worker_to_C6_worker_0 = ObjectFifo(data_ty, tile_2_5, tile_2_3, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_mem_col4_to_shim_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D7D8_col4')
-    of_from_A7_B7_worker_to_C7_worker_0 = ObjectFifo(data_ty, tile_3_4, tile_3_2, depth=2, name='L1_L1_elwiseadd_relu')
-    of_from_A8_B8_worker_to_C8_worker_0 = ObjectFifo(data_ty, tile_3_5, tile_3_3, depth=2, name='L1_L1_elwiseadd_relu')
-    split_of_from_mem_col1_to_worker_A_key = of_from_shim_to_mem_col1_0.cons().split(offsets=[1024.0, 2048.0], obj_type=data_a_ty, depth=2, name='split_of_from_mem_col1_to_worker_A_key', placement=tile_0_1)
-    split_of_from_mem_col1_to_worker_B_key = of_from_shim_to_mem_col1_1.cons().split(offsets=[1024.0, 2048.0], obj_type=data_b_ty, depth=2, name='split_of_from_mem_col1_to_worker_B_key', placement=tile_0_1)
-    join_of_from_worker_mem_col1_to_D_key = of_from_mem_col1_to_shim_0.prod().join(obj_type=data_d_ty, depth=2, name='join_of_from_worker_mem_col1_to_D_key', placement=tile_0_1)
-    split_of_from_mem_col2_to_worker_A_key = of_from_shim_to_mem_col2_0.cons().split(offsets=[3072.0, 4096.0], obj_type=data_a_ty, depth=2, name='split_of_from_mem_col2_to_worker_A_key', placement=tile_1_1)
-    split_of_from_mem_col2_to_worker_B_key = of_from_shim_to_mem_col2_1.cons().split(offsets=[3072.0, 4096.0], obj_type=data_b_ty, depth=2, name='split_of_from_mem_col2_to_worker_B_key', placement=tile_1_1)
-    join_of_from_worker_mem_col2_to_D_key = of_from_mem_col2_to_shim_0.prod().join(obj_type=data_d_ty, depth=2, name='join_of_from_worker_mem_col2_to_D_key', placement=tile_1_1)
-    split_of_from_mem_col3_to_worker_A_key = of_from_shim_to_mem_col3_0.cons().split(offsets=[5120.0, 6144.0], obj_type=data_a_ty, depth=2, name='split_of_from_mem_col3_to_worker_A_key', placement=tile_2_1)
-    split_of_from_mem_col3_to_worker_B_key = of_from_shim_to_mem_col3_1.cons().split(offsets=[5120.0, 6144.0], obj_type=data_b_ty, depth=2, name='split_of_from_mem_col3_to_worker_B_key', placement=tile_2_1)
-    join_of_from_worker_mem_col3_to_D_key = of_from_mem_col3_to_shim_0.prod().join(obj_type=data_d_ty, depth=2, name='join_of_from_worker_mem_col3_to_D_key', placement=tile_2_1)
-    split_of_from_mem_col4_to_worker_A_key = of_from_shim_to_mem_col4_0.cons().split(offsets=[7168.0, 8192.0], obj_type=data_a_ty, depth=2, name='split_of_from_mem_col4_to_worker_A_key', placement=tile_3_1)
-    split_of_from_mem_col4_to_worker_B_key = of_from_shim_to_mem_col4_1.cons().split(offsets=[7168.0, 8192.0], obj_type=data_b_ty, depth=2, name='split_of_from_mem_col4_to_worker_B_key', placement=tile_3_1)
-    join_of_from_worker_mem_col4_to_D_key = of_from_mem_col4_to_shim_0.prod().join(obj_type=data_d_ty, depth=2, name='join_of_from_worker_mem_col4_to_D_key', placement=tile_3_1)
+    # Define base object FIFOs for shim <-> memory connections
+    of_from_shim_col0_to_mem_col0_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A1A2_col0')
+    of_from_shim_col0_to_mem_col0_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B1B2_col0')
+    of_from_shim_col1_to_mem_col1_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A3A4_col1')
+    of_from_shim_col1_to_mem_col1_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B3B4_col1')
+    of_from_shim_col2_to_mem_col2_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A5A6_col2')
+    of_from_shim_col2_to_mem_col2_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B5B6_col2')
+    of_from_shim_col3_to_mem_col3_0 = ObjectFifo(data_a_ty, depth=2, name='SHIM_L3_L2_A7A8_col3')
+    of_from_shim_col3_to_mem_col3_1 = ObjectFifo(data_b_ty, depth=2, name='SHIM_L3_L2_B7B8_col3')
+    of_from_mem_col0_to_shim_col0_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D1D2_col0')
+    of_from_mem_col1_to_shim_col1_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D3D4_col1')
+    of_from_mem_col2_to_shim_col2_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D5D6_col2')
+    of_from_mem_col3_to_shim_col3_0 = ObjectFifo(data_d_ty, depth=2, name='SHIM_L2_L3_D7D8_col3')
 
-    # Define external C/C++ kernel functions
-    external_A1_B1_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C1_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A2_B2_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C2_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A3_B3_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C3_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A4_B4_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C4_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A5_B5_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C5_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A6_B6_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C6_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A7_B7_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C7_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_A8_B8_worker = ExternalFunction(
-    name="eltwise_add_bf16_scalar",
-    source_file="../../../aie_kernels/aie2/add.cc",
-    arg_types=[data_ty] * 3,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
-    external_C8_worker = ExternalFunction(
-    name="bf16_relu",
-    source_file="../../../aie_kernels/aie2/relu.cc",
-    arg_types=[data_ty] * 2,
-    include_dirs=['/scratch/andrewa/mlir-aie/aie_kernels/']
-)
+    # Split/Join operations on memory tiles
+    split_mem_col0_A = of_from_shim_col0_to_mem_col0_0.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col0_A_{i}' for i in range(2)], placement=tile_0_1)
+    split_mem_col0_B = of_from_shim_col0_to_mem_col0_1.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col0_B_{i}' for i in range(2)], placement=tile_0_1)
+    join_mem_col0_D = of_from_mem_col0_to_shim_col0_0.prod().join(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'join_mem_col0_D_{i}' for i in range(2)], placement=tile_0_1)
+    split_mem_col1_A = of_from_shim_col1_to_mem_col1_0.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col1_A_{i}' for i in range(2)], placement=tile_1_1)
+    split_mem_col1_B = of_from_shim_col1_to_mem_col1_1.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col1_B_{i}' for i in range(2)], placement=tile_1_1)
+    join_mem_col1_D = of_from_mem_col1_to_shim_col1_0.prod().join(offsets=[256, 320], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'join_mem_col1_D_{i}' for i in range(2)], placement=tile_1_1)
+    split_mem_col2_A = of_from_shim_col2_to_mem_col2_0.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col2_A_{i}' for i in range(2)], placement=tile_2_1)
+    split_mem_col2_B = of_from_shim_col2_to_mem_col2_1.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col2_B_{i}' for i in range(2)], placement=tile_2_1)
+    join_mem_col2_D = of_from_mem_col2_to_shim_col2_0.prod().join(offsets=[512, 576], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'join_mem_col2_D_{i}' for i in range(2)], placement=tile_2_1)
+    split_mem_col3_A = of_from_shim_col3_to_mem_col3_0.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col3_A_{i}' for i in range(2)], placement=tile_3_1)
+    split_mem_col3_B = of_from_shim_col3_to_mem_col3_1.cons().split(offsets=[0, 64], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'split_mem_col3_B_{i}' for i in range(2)], placement=tile_3_1)
+    join_mem_col3_D = of_from_mem_col3_to_shim_col3_0.prod().join(offsets=[768, 832], obj_types=[chunk_ty] * 2, depths=[2] * 2, names=[f'join_mem_col3_D_{i}' for i in range(2)], placement=tile_3_1)
+
+    # Define internal object FIFOs (compute->compute, compute->mem)
+    of_from_A1_B1_worker_to_C1_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A1_B1_worker_C1_worker_0')
+    of_from_C1_worker_to_mem_col0_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D1D2_col0_C1_worker_mem_col0_0')
+    of_from_A2_B2_worker_to_C2_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A2_B2_worker_C2_worker_0')
+    of_from_C2_worker_to_mem_col0_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D1D2_col0_C2_worker_mem_col0_0')
+    of_from_A3_B3_worker_to_C3_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A3_B3_worker_C3_worker_0')
+    of_from_C3_worker_to_mem_col1_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D3D4_col1_C3_worker_mem_col1_0')
+    of_from_A4_B4_worker_to_C4_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A4_B4_worker_C4_worker_0')
+    of_from_C4_worker_to_mem_col1_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D3D4_col1_C4_worker_mem_col1_0')
+    of_from_A5_B5_worker_to_C5_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A5_B5_worker_C5_worker_0')
+    of_from_C5_worker_to_mem_col2_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D5D6_col2_C5_worker_mem_col2_0')
+    of_from_A6_B6_worker_to_C6_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A6_B6_worker_C6_worker_0')
+    of_from_C6_worker_to_mem_col2_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D5D6_col2_C6_worker_mem_col2_0')
+    of_from_A7_B7_worker_to_C7_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A7_B7_worker_C7_worker_0')
+    of_from_C7_worker_to_mem_col3_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D7D8_col3_C7_worker_mem_col3_0')
+    of_from_A8_B8_worker_to_C8_worker_0 = ObjectFifo(chunk_ty, depth=2, name='L1_L1_elwiseadd_relu_A8_B8_worker_C8_worker_0')
+    of_from_C8_worker_to_mem_col3_0 = ObjectFifo(chunk_ty, depth=2, name='MEM_L1_L2_D7D8_col3_C8_worker_mem_col3_0')
 
     # Define core functions for each compute node
-    def core_fn_A1_B1_worker(of_in1, of_in2, of_out1, external_A1_B1_worker):
+    def core_fn_A1B1worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A1_B1_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A1B1worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A1B1worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C1_worker(of_in1, of_out1, external_C1_worker):
+    def core_fn_C1worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C1_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C1worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A2_B2_worker(of_in1, of_in2, of_out1, external_A2_B2_worker):
+    def core_fn_A2B2worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A2_B2_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A2B2worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A2B2worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C2_worker(of_in1, of_out1, external_C2_worker):
+    def core_fn_C2worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C2_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C2worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A3_B3_worker(of_in1, of_in2, of_out1, external_A3_B3_worker):
+    def core_fn_A3B3worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A3_B3_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A3B3worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A3B3worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C3_worker(of_in1, of_out1, external_C3_worker):
+    def core_fn_C3worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C3_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C3worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A4_B4_worker(of_in1, of_in2, of_out1, external_A4_B4_worker):
+    def core_fn_A4B4worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A4_B4_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A4B4worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A4B4worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C4_worker(of_in1, of_out1, external_C4_worker):
+    def core_fn_C4worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C4_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C4worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A5_B5_worker(of_in1, of_in2, of_out1, external_A5_B5_worker):
+    def core_fn_A5B5worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A5_B5_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A5B5worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A5B5worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C5_worker(of_in1, of_out1, external_C5_worker):
+    def core_fn_C5worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C5_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C5worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A6_B6_worker(of_in1, of_in2, of_out1, external_A6_B6_worker):
+    def core_fn_A6B6worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A6_B6_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A6B6worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A6B6worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C6_worker(of_in1, of_out1, external_C6_worker):
+    def core_fn_C6worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C6_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C6worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A7_B7_worker(of_in1, of_in2, of_out1, external_A7_B7_worker):
+    def core_fn_A7B7worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A7_B7_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A7B7worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A7B7worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C7_worker(of_in1, of_out1, external_C7_worker):
+    def core_fn_C7worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C7_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C7worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
-    def core_fn_A8_B8_worker(of_in1, of_in2, of_out1, external_A8_B8_worker):
+    def core_fn_A8B8worker(of_in1, of_in2, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_in2 = of_in2.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_A8_B8_worker(elem_in1, elem_in2, elem_out1)
+        n = elem_in1.shape[0]  # Get length from MemRef shape
+        print(f'DEBUG: core_fn_A8B8worker processing {n} elements')
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] + elem_in2[i]
+            print(f'DEBUG: core_fn_A8B8worker first: { elem_in1[0] } + { elem_in2[0] } = { elem_out1[0] }')
         of_in1.release(1)
         of_in2.release(1)
         of_out1.release(1)
-    def core_fn_C8_worker(of_in1, of_out1, external_C8_worker):
+    def core_fn_C8worker(of_in1, of_out1):
         elem_in1 = of_in1.acquire(1)
         elem_out1 = of_out1.acquire(1)
-        external_C8_worker(elem_in1, elem_out1)
+        n = elem_in1.shape[0]
+        print(f'DEBUG: core_fn_C8worker processing {n} elements')
+        zero = 0.0
+        for i in range(n):
+            elem_out1[i] = elem_in1[i] if elem_in1[i] > zero else zero
         of_in1.release(1)
         of_out1.release(1)
 
     # Define workers to execute core functions on tiles
-    worker_A1_B1_worker = Worker(core_fn_A1_B1_worker, [split_of_from_mem_col1_to_worker_A_key.cons(), split_of_from_mem_col1_to_worker_B_key.cons(), of_from_A1_B1_worker_to_C1_worker_0.prod(), external_A1_B1_worker], placement=tile_0_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C1_worker = Worker(core_fn_C1_worker, [of_from_A1_B1_worker_to_C1_worker_0.cons(), join_of_from_worker_mem_col1_to_D_key.prod(), external_C1_worker], placement=tile_0_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A2_B2_worker = Worker(core_fn_A2_B2_worker, [split_of_from_mem_col1_to_worker_A_key.cons(), split_of_from_mem_col1_to_worker_B_key.cons(), of_from_A2_B2_worker_to_C2_worker_0.prod(), external_A2_B2_worker], placement=tile_0_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C2_worker = Worker(core_fn_C2_worker, [of_from_A2_B2_worker_to_C2_worker_0.cons(), join_of_from_worker_mem_col1_to_D_key.prod(), external_C2_worker], placement=tile_0_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A3_B3_worker = Worker(core_fn_A3_B3_worker, [split_of_from_mem_col2_to_worker_A_key.cons(), split_of_from_mem_col2_to_worker_B_key.cons(), of_from_A3_B3_worker_to_C3_worker_0.prod(), external_A3_B3_worker], placement=tile_1_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C3_worker = Worker(core_fn_C3_worker, [of_from_A3_B3_worker_to_C3_worker_0.cons(), join_of_from_worker_mem_col2_to_D_key.prod(), external_C3_worker], placement=tile_1_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A4_B4_worker = Worker(core_fn_A4_B4_worker, [split_of_from_mem_col2_to_worker_A_key.cons(), split_of_from_mem_col2_to_worker_B_key.cons(), of_from_A4_B4_worker_to_C4_worker_0.prod(), external_A4_B4_worker], placement=tile_1_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C4_worker = Worker(core_fn_C4_worker, [of_from_A4_B4_worker_to_C4_worker_0.cons(), join_of_from_worker_mem_col2_to_D_key.prod(), external_C4_worker], placement=tile_1_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A5_B5_worker = Worker(core_fn_A5_B5_worker, [split_of_from_mem_col3_to_worker_A_key.cons(), split_of_from_mem_col3_to_worker_B_key.cons(), of_from_A5_B5_worker_to_C5_worker_0.prod(), external_A5_B5_worker], placement=tile_2_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C5_worker = Worker(core_fn_C5_worker, [of_from_A5_B5_worker_to_C5_worker_0.cons(), join_of_from_worker_mem_col3_to_D_key.prod(), external_C5_worker], placement=tile_2_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A6_B6_worker = Worker(core_fn_A6_B6_worker, [split_of_from_mem_col3_to_worker_A_key.cons(), split_of_from_mem_col3_to_worker_B_key.cons(), of_from_A6_B6_worker_to_C6_worker_0.prod(), external_A6_B6_worker], placement=tile_2_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C6_worker = Worker(core_fn_C6_worker, [of_from_A6_B6_worker_to_C6_worker_0.cons(), join_of_from_worker_mem_col3_to_D_key.prod(), external_C6_worker], placement=tile_2_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A7_B7_worker = Worker(core_fn_A7_B7_worker, [split_of_from_mem_col4_to_worker_A_key.cons(), split_of_from_mem_col4_to_worker_B_key.cons(), of_from_A7_B7_worker_to_C7_worker_0.prod(), external_A7_B7_worker], placement=tile_3_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C7_worker = Worker(core_fn_C7_worker, [of_from_A7_B7_worker_to_C7_worker_0.cons(), join_of_from_worker_mem_col4_to_D_key.prod(), external_C7_worker], placement=tile_3_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_A8_B8_worker = Worker(core_fn_A8_B8_worker, [split_of_from_mem_col4_to_worker_A_key.cons(), split_of_from_mem_col4_to_worker_B_key.cons(), of_from_A8_B8_worker_to_C8_worker_0.prod(), external_A8_B8_worker], placement=tile_3_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
-    worker_C8_worker = Worker(core_fn_C8_worker, [of_from_A8_B8_worker_to_C8_worker_0.cons(), join_of_from_worker_mem_col4_to_D_key.prod(), external_C8_worker], placement=tile_3_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A1B1worker = Worker(core_fn_A1B1worker, [split_mem_col0_A[0].cons(), split_mem_col0_B[0].cons(), of_from_A1_B1_worker_to_C1_worker_0.prod()], placement=tile_0_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C1worker = Worker(core_fn_C1worker, [of_from_A1_B1_worker_to_C1_worker_0.cons(), join_mem_col0_D[0].prod()], placement=tile_0_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A2B2worker = Worker(core_fn_A2B2worker, [split_mem_col0_A[1].cons(), split_mem_col0_B[1].cons(), of_from_A2_B2_worker_to_C2_worker_0.prod()], placement=tile_0_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C2worker = Worker(core_fn_C2worker, [of_from_A2_B2_worker_to_C2_worker_0.cons(), join_mem_col0_D[1].prod()], placement=tile_0_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A3B3worker = Worker(core_fn_A3B3worker, [split_mem_col1_A[0].cons(), split_mem_col1_B[0].cons(), of_from_A3_B3_worker_to_C3_worker_0.prod()], placement=tile_1_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C3worker = Worker(core_fn_C3worker, [of_from_A3_B3_worker_to_C3_worker_0.cons(), join_mem_col1_D[0].prod()], placement=tile_1_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A4B4worker = Worker(core_fn_A4B4worker, [split_mem_col1_A[1].cons(), split_mem_col1_B[1].cons(), of_from_A4_B4_worker_to_C4_worker_0.prod()], placement=tile_1_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C4worker = Worker(core_fn_C4worker, [of_from_A4_B4_worker_to_C4_worker_0.cons(), join_mem_col1_D[1].prod()], placement=tile_1_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A5B5worker = Worker(core_fn_A5B5worker, [split_mem_col2_A[0].cons(), split_mem_col2_B[0].cons(), of_from_A5_B5_worker_to_C5_worker_0.prod()], placement=tile_2_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C5worker = Worker(core_fn_C5worker, [of_from_A5_B5_worker_to_C5_worker_0.cons(), join_mem_col2_D[0].prod()], placement=tile_2_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A6B6worker = Worker(core_fn_A6B6worker, [split_mem_col2_A[1].cons(), split_mem_col2_B[1].cons(), of_from_A6_B6_worker_to_C6_worker_0.prod()], placement=tile_2_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C6worker = Worker(core_fn_C6worker, [of_from_A6_B6_worker_to_C6_worker_0.cons(), join_mem_col2_D[1].prod()], placement=tile_2_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A7B7worker = Worker(core_fn_A7B7worker, [split_mem_col3_A[0].cons(), split_mem_col3_B[0].cons(), of_from_A7_B7_worker_to_C7_worker_0.prod()], placement=tile_3_4, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C7worker = Worker(core_fn_C7worker, [of_from_A7_B7_worker_to_C7_worker_0.cons(), join_mem_col3_D[0].prod()], placement=tile_3_2, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_A8B8worker = Worker(core_fn_A8B8worker, [split_mem_col3_A[1].cons(), split_mem_col3_B[1].cons(), of_from_A8_B8_worker_to_C8_worker_0.prod()], placement=tile_3_5, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
+    worker_C8worker = Worker(core_fn_C8worker, [of_from_A8_B8_worker_to_C8_worker_0.cons(), join_mem_col3_D[1].prod()], placement=tile_3_3, while_true=False, stack_size=1024, allocation_scheme='heap', trace=False, trace_events=None)
 
     # Define runtime sequence for starting workers and moving data
     rt = Runtime()
     with rt.sequence(data_a_ty, data_b_ty, data_d_ty) as (A,B,D):
-       Workers = [worker_A1_B1_worker, worker_C1_worker, worker_A2_B2_worker, worker_C2_worker, worker_A3_B3_worker, worker_C3_worker, worker_A4_B4_worker, worker_C4_worker, worker_A5_B5_worker, worker_C5_worker, worker_A6_B6_worker, worker_C6_worker, worker_A7_B7_worker, worker_C7_worker, worker_A8_B8_worker, worker_C8_worker]
+       Workers = [worker_A1B1worker, worker_C1worker, worker_A2B2worker, worker_C2worker, worker_A3B3worker, worker_C3worker, worker_A4B4worker, worker_C4worker, worker_A5B5worker, worker_C5worker, worker_A6B6worker, worker_C6worker, worker_A7B7worker, worker_C7worker, worker_A8B8worker, worker_C8worker]
        rt.start(*Workers)
-       rt.fill(in_fifo=of_from_shim_to_mem_col1_0.prod(), in_data=A, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=2048.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col2_0.prod(), in_data=A, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=4096.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col3_0.prod(), in_data=A, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=6144.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col4_0.prod(), in_data=A, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=8192.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col1_1.prod(), in_data=B, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=2048.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col2_1.prod(), in_data=B, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=4096.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col3_1.prod(), in_data=B, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=6144.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.fill(in_fifo=of_from_shim_to_mem_col4_1.prod(), in_data=B, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=8192.0, sizes=[1024, (data_size/4)/1024], strides=[1,1024]))
-       rt.drain(out_fifo=of_from_mem_col1_to_shim_0.cons(), out_data=D, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=2048.0, sizes=[1024, (data_size/4)/1024], strides=[1, 1024]))
-       rt.drain(out_fifo=of_from_mem_col2_to_shim_0.cons(), out_data=D, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=4096.0, sizes=[1024, (data_size/4)/1024], strides=[1, 1024]))
-       rt.drain(out_fifo=of_from_mem_col3_to_shim_0.cons(), out_data=D, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=6144.0, sizes=[1024, (data_size/4)/1024], strides=[1, 1024]))
-       rt.drain(out_fifo=of_from_mem_col4_to_shim_0.cons(), out_data=D, tap=TensorAccessPattern(tensor_dims=[1,1024], offset=8192.0, sizes=[1024, (data_size/4)/1024], strides=[1, 1024]))
+       rt.fill(of_from_shim_col0_to_mem_col0_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=0, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=64, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=128, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=192, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=256, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=320, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=384, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=448, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=512, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=576, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=640, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=704, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=768, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=832, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=896, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_0.prod(), A, tap=TensorAccessPattern(tensor_dims=[1024,], offset=960, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=0, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=64, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=128, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col0_to_mem_col0_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=192, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=256, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=320, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=384, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col1_to_mem_col1_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=448, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=512, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=576, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=640, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col2_to_mem_col2_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=704, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=768, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=832, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=896, sizes=[64,], strides=[1,]))
+       rt.fill(of_from_shim_col3_to_mem_col3_1.prod(), B, tap=TensorAccessPattern(tensor_dims=[1024,], offset=960, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col0_to_shim_col0_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=0, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col0_to_shim_col0_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=64, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col0_to_shim_col0_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=128, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col0_to_shim_col0_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=192, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col1_to_shim_col1_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=256, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col1_to_shim_col1_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=320, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col1_to_shim_col1_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=384, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col1_to_shim_col1_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=448, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col2_to_shim_col2_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=512, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col2_to_shim_col2_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=576, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col2_to_shim_col2_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=640, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col2_to_shim_col2_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=704, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col3_to_shim_col3_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=768, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col3_to_shim_col3_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=832, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col3_to_shim_col3_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=896, sizes=[64,], strides=[1,]))
+       rt.drain(of_from_mem_col3_to_shim_col3_0.cons(), D, wait=True, tap=TensorAccessPattern(tensor_dims=[1024,], offset=960, sizes=[64,], strides=[1,]))
     my_program = Program(iron.get_current_device(), rt)
     my_program = my_program.resolve_program(SequentialPlacer())
     return my_program
 
 def main():
     datatype = bfloat16
-    data_size = 8192
+    data_size = 1024
     inputA = iron.rand(data_size, dtype=datatype, device="npu")
-    inputB = iron.arange(data_size, dtype=datatype, device="npu", step=-1)
+    inputB = iron.rand(data_size, dtype=datatype, device="npu")
     outputD = iron.zeros(data_size, dtype=datatype, device="npu")
-    generated_design(inputA, inputB, outputD)
-    print(outputD)
+    program = generated_design(inputA, inputB, outputD)
+    program()
+    print(iron.to_numpy(outputD))
 if __name__ == "__main__":
     main()
