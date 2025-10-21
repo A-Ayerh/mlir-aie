@@ -57,42 +57,42 @@ def base_aaa(inputA, inputB, outputD):
 
     MEM_L2_L1_A3A4_col1 = SHIM_L3_L2_A3A4_col1.cons().split(
         obj_types=[chunk_a_worker,chunk_a_worker],
-        offsets=[((inputA.numel()) // 8) * 2, ((inputA.numel()) // 8) * 3],
+        offsets=[((inputA.numel()) // 8) * 0, ((inputA.numel()) // 8) * 1],
         names=["MEM_L2_L1_A3_col1", "MEM_L2_L1_A4_col1"],
         placement=Tile(1, 1)
     )
 
     MEM_L2_L1_B3B4_col1 = SHIM_L3_L2_B3B4_col1.cons().split(
         obj_types=[chunk_b_worker,chunk_b_worker],
-        offsets=[((inputB.numel()) // 8) * 2, ((inputB.numel()) // 8) * 3],
+        offsets=[((inputB.numel()) // 8) * 0, ((inputB.numel()) // 8) * 1],
         names=["MEM_L2_L1_B3_col1", "MEM_L2_L1_B4_col1"],
         placement=Tile(1, 1)
     )
 
     MEM_L2_L1_A5A6_col2 = SHIM_L3_L2_A5A6_col2.cons().split(
         obj_types=[chunk_a_worker,chunk_a_worker],
-        offsets=[((inputA.numel()) // 8) * 4, ((inputA.numel()) // 8) * 5],
+        offsets=[((inputA.numel()) // 8) * 0, ((inputA.numel()) // 8) * 1],
         names=["MEM_L2_L1_A5_col2", "MEM_L2_L1_A6_col2"],
         placement=Tile(2, 1)
     )
 
     MEM_L2_L1_B5B6_col2 = SHIM_L3_L2_B5B6_col2.cons().split(
         obj_types=[chunk_b_worker,chunk_b_worker],
-        offsets=[((inputB.numel()) // 8) * 4, ((inputB.numel()) // 8) * 5],
+        offsets=[((inputB.numel()) // 8) * 0, ((inputB.numel()) // 8) * 1],
         names=["MEM_L2_L1_B5_col2", "MEM_L2_L1_B6_col2"],
         placement=Tile(2, 1)
     )
 
     MEM_L2_L1_A7A8_col3 = SHIM_L3_L2_A7A8_col3.cons().split(
         obj_types=[chunk_a_worker,chunk_a_worker],
-        offsets=[((inputA.numel()) // 8) * 6, ((inputA.numel()) // 8) * 7],
+        offsets=[((inputA.numel()) // 8) * 0, ((inputA.numel()) // 8) * 1],
         names=["MEM_L2_L1_A7_col3", "MEM_L2_L1_A8_col3"],
         placement=Tile(3, 1)
     )
 
     MEM_L2_L1_B7B8_col3 = SHIM_L3_L2_B7B8_col3.cons().split(
         obj_types=[chunk_b_worker,chunk_b_worker],
-        offsets=[((inputB.numel()) // 16) * 6, ((inputB.numel()) // 16) * 7],
+        offsets=[((inputB.numel()) // 8) * 0, ((inputB.numel()) // 8) * 1],
         names=["MEM_L2_L1_B7_col3", "MEM_L2_L1_B8_col3"],
         placement=Tile(3, 1)
     )
@@ -124,19 +124,19 @@ def base_aaa(inputA, inputB, outputD):
         obj_types=[chunk_d_worker,chunk_d_worker], 
         names=["MEM_L1_L2_D3_col1", "MEM_L1_L2_D4_col1"], 
         placement=Tile(1,1),
-        offsets=[((outputD.numel()) // 8) * 2, ((outputD.numel()) // 8) * 3],
+        offsets=[((outputD.numel()) // 8) * 0, ((outputD.numel()) // 8) * 1],
     )
     MEM_L1_L2_D5D6_col2 = SHIM_L2_L3_D5D6_col2.prod().join(
         obj_types=[chunk_d_worker,chunk_d_worker],
         names=["MEM_L1_L2_D5_col2", "MEM_L1_L2_D6_col2"], 
         placement=Tile(2,1),
-        offsets=[((outputD.numel()) // 8) * 4, ((outputD.numel()) // 8) * 5],
+        offsets=[((outputD.numel()) // 8) * 0, ((outputD.numel()) // 8) * 1],
     )
     MEM_L1_L2_D7D8_col3 = SHIM_L2_L3_D7D8_col3.prod().join(
         obj_types=[chunk_d_worker,chunk_d_worker],
         names=["MEM_L1_L2_D7_col3", "MEM_L1_L2_D8_col3"], 
         placement=Tile(3,1),
-        offsets=[((outputD.numel()) // 8) * 6, ((outputD.numel()) // 8) * 7],
+        offsets=[((outputD.numel()) // 8) * 0, ((outputD.numel()) // 8) * 1],
     )
 
     #Define kernels here... ------------------------------------------------\/
