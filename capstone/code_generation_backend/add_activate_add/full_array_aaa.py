@@ -205,20 +205,20 @@ def base_aaa(inputA, inputB, outputD):
     with rt.sequence(chunk_a, chunk_b, chunk_d) as (A, B, D):
         rt.start(*Workers)
 
-        rt.fill(placement=Tile(0,0), in_fifo=SHIM_L3_L2_A1A2_col0.prod(), source=A,)# tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*0), sizes=[1024, (int(inputA.numel())//4)//1024], strides=[2, 1024],))
-        rt.fill(placement=Tile(1,0), in_fifo=SHIM_L3_L2_A3A4_col1.prod(), source=A,)# tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*1), sizes=[1024, (int(inputA.numel())//4)//1024], strides=[2, 1024],))
-        rt.fill(placement=Tile(2,0), in_fifo=SHIM_L3_L2_A5A6_col2.prod(), source=A,)# tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*2), sizes=[1024, (int(inputA.numel())//4)//1024], strides=[2, 1024],))
-        rt.fill(placement=Tile(3,0), in_fifo=SHIM_L3_L2_A7A8_col3.prod(), source=A,)# tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*3), sizes=[1024, (int(inputA.numel())//4)//1024], strides=[2, 1024],))
+        rt.fill(placement=Tile(0,0), in_fifo=SHIM_L3_L2_A1A2_col0.prod(), source=A, tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*0), sizes=[((inputA.numel())//4)//((inputA.numel())//8), ((inputA.numel())//8)], strides=[((inputA.numel())//8), 1],))
+        rt.fill(placement=Tile(1,0), in_fifo=SHIM_L3_L2_A3A4_col1.prod(), source=A, tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*1), sizes=[((inputA.numel())//4)//((inputA.numel())//8), ((inputA.numel())//8)], strides=[((inputA.numel())//8), 1],))
+        rt.fill(placement=Tile(2,0), in_fifo=SHIM_L3_L2_A5A6_col2.prod(), source=A, tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*2), sizes=[((inputA.numel())//4)//((inputA.numel())//8), ((inputA.numel())//8)], strides=[((inputA.numel())//8), 1],))
+        rt.fill(placement=Tile(3,0), in_fifo=SHIM_L3_L2_A7A8_col3.prod(), source=A, tap=TensorAccessPattern(tensor_dims=[(inputA.numel()),],offset=(((inputA.numel())//4)*3), sizes=[((inputA.numel())//4)//((inputA.numel())//8), ((inputA.numel())//8)], strides=[((inputA.numel())//8), 1],))
 
-        rt.fill(placement=Tile(0,0), in_fifo=SHIM_L3_L2_B1B2_col0.prod(), source=B,)# tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*0), sizes=[1024, (int(inputB.numel())//4)//1024], strides=[2, 1024],))
-        rt.fill(placement=Tile(1,0), in_fifo=SHIM_L3_L2_B3B4_col1.prod(), source=B,)# tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*1), sizes=[1024, (int(inputB.numel())//4)//1024], strides=[2, 1024],))
-        rt.fill(placement=Tile(2,0), in_fifo=SHIM_L3_L2_B5B6_col2.prod(), source=B,)# tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*2), sizes=[1024, (int(inputB.numel())//4)//1024], strides=[2, 1024],))
-        rt.fill(placement=Tile(3,0), in_fifo=SHIM_L3_L2_B7B8_col3.prod(), source=B,)# tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*3), sizes=[1024, (int(inputB.numel())//4)//1024], strides=[2, 1024],))
+        rt.fill(placement=Tile(0,0), in_fifo=SHIM_L3_L2_B1B2_col0.prod(), source=B, tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*0), sizes=[((inputB.numel())//4)//((inputB.numel())//8), ((inputB.numel())//8)], strides=[((inputB.numel())//8), 1],))
+        rt.fill(placement=Tile(1,0), in_fifo=SHIM_L3_L2_B3B4_col1.prod(), source=B, tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*1), sizes=[((inputB.numel())//4)//((inputB.numel())//8), ((inputB.numel())//8)], strides=[((inputB.numel())//8), 1],))
+        rt.fill(placement=Tile(2,0), in_fifo=SHIM_L3_L2_B5B6_col2.prod(), source=B, tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*2), sizes=[((inputB.numel())//4)//((inputB.numel())//8), ((inputB.numel())//8)], strides=[((inputB.numel())//8), 1],))
+        rt.fill(placement=Tile(3,0), in_fifo=SHIM_L3_L2_B7B8_col3.prod(), source=B, tap=TensorAccessPattern(tensor_dims=[(inputB.numel()),],offset=(((inputB.numel())//4)*3), sizes=[((inputB.numel())//4)//((inputB.numel())//8), ((inputB.numel())//8)], strides=[((inputB.numel())//8), 1],))
 
-        rt.drain(placement=Tile(0,0), out_fifo=SHIM_L2_L3_D1D2_col0.cons(), dest=D, wait=True)# tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*0), sizes=[1024, (int(outputD.numel())//4)//1024], strides=[2, 1024],))
-        rt.drain(placement=Tile(1,0), out_fifo=SHIM_L2_L3_D3D4_col1.cons(), dest=D, wait=True)# tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*1), sizes=[1024, (int(outputD.numel())//4)//1024], strides=[2, 1024],))
-        rt.drain(placement=Tile(2,0), out_fifo=SHIM_L2_L3_D5D6_col2.cons(), dest=D, wait=True)# tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*2), sizes=[1024, (int(outputD.numel())//4)//1024], strides=[2, 1024],))
-        rt.drain(placement=Tile(3,0), out_fifo=SHIM_L2_L3_D7D8_col3.cons(), dest=D, wait=True)# tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*3), sizes=[1024, (int(outputD.numel())//4)//1024], strides=[2, 1024],))
+        rt.drain(placement=Tile(0,0), out_fifo=SHIM_L2_L3_D1D2_col0.cons(), dest=D, wait=True, tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*0), sizes=[((outputD.numel())//4)//((outputD.numel())//8), ((outputD.numel())//8)], strides=[((outputD.numel())//8), 1],))
+        rt.drain(placement=Tile(1,0), out_fifo=SHIM_L2_L3_D3D4_col1.cons(), dest=D, wait=True, tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*1), sizes=[((outputD.numel())//4)//((outputD.numel())//8), ((outputD.numel())//8)], strides=[((outputD.numel())//8), 1],))
+        rt.drain(placement=Tile(2,0), out_fifo=SHIM_L2_L3_D5D6_col2.cons(), dest=D, wait=True, tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*2), sizes=[((outputD.numel())//4)//((outputD.numel())//8), ((outputD.numel())//8)], strides=[((outputD.numel())//8), 1],))
+        rt.drain(placement=Tile(3,0), out_fifo=SHIM_L2_L3_D7D8_col3.cons(), dest=D, wait=True, tap=TensorAccessPattern(tensor_dims=[(outputD.numel()),],offset=(((outputD.numel())//4)*3), sizes=[((outputD.numel())//4)//((outputD.numel())//8), ((outputD.numel())//8)], strides=[((outputD.numel())//8), 1],))
 
     my_program = Program(iron.get_current_device(), rt)
     my_program = my_program.resolve_program(SequentialPlacer()) # No sequential placer for this program (all is explicitly placed)
@@ -229,8 +229,8 @@ def base_aaa(inputA, inputB, outputD):
 def main():
     # Define Data here ... -------------------------------------------------\/
     datatype = bfloat16
-    data_size = 8192 # 1024, 1024, = 2048 
-    inputA = iron.rand(data_size, dtype=datatype, device="npu")
+    data_size = 128 # 1024, 1024, = 2048 
+    inputA = iron.arange(data_size, dtype=datatype, device="npu")
     inputB = iron.arange(data_size, dtype=datatype, device="npu")
     outputD = iron.zeros(data_size, dtype=datatype, device="npu")
     base_aaa(inputA, inputB, outputD)
