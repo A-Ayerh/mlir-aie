@@ -1242,10 +1242,7 @@ struct AIEObjectFifoStatefulTransformPass
               int64_t tripCount = 0;
               if (remLoop.getSingleLowerBound() &&
                   remLoop.getSingleUpperBound() && remLoop.getSingleStep()) {
-                tripCount = constantTripCount(*(remLoop.getSingleLowerBound()),
-                                              *(remLoop.getSingleUpperBound()),
-                                              *(remLoop.getSingleStep()))
-                                .value_or(0);
+                tripCount = remLoop.getStaticTripCount()->getSExtValue();
               }
               int unrollFactor =
                   computeLCM(objFifoSizes); // also counts original loop body
@@ -1638,18 +1635,25 @@ struct AIEObjectFifoStatefulTransformPass
   /// shimDMAAllocationOp containing the channelDir, channelIndex and
   /// shimTile col assigned by the objectFifo lowering.
   void createObjectFifoAllocationInfo(OpBuilder &builder, MLIRContext *ctx,
-                                      FlatSymbolRefAttr obj_fifo, int colIndex,
-                                      DMAChannelDir channelDir,
+                                      ObjectFifoCreateOp &objFifoOp,
+                                      int colIndex, DMAChannelDir channelDir,
                                       int channelIndex, bool plio,
                                       std::optional<PacketInfoAttr> packet) {
     PacketInfoAttr packetInfo = nullptr;
     if (packet)
       packetInfo = *packet;
-    builder.create<ShimDMAAllocationOp>(builder.getUnknownLoc(), obj_fifo,
+    std::string alloc_name = getShimAllocationName(objFifoOp.getName());
+    // SymbolRefAttr::get(ctx, objFifoOp.getName())
+    builder.create<ShimDMAAllocationOp>(builder.getUnknownLoc(),
+                                        StringAttr::get(ctx, alloc_name),
                                         DMAChannelDirAttr::get(ctx, channelDir),
                                         builder.getI64IntegerAttr(channelIndex),
                                         builder.getI64IntegerAttr(colIndex),
                                         builder.getBoolAttr(plio), packetInfo);
+  }
+
+  static std::string getShimAllocationName(llvm::StringRef objFifoName) {
+    return (objFifoName + "_shim_alloc").str();
   }
 
   /// Function used to verify that an objectfifo is present in at most one
@@ -1911,9 +1915,9 @@ struct AIEObjectFifoStatefulTransformPass
 
       if (producer.getProducerTileOp().isShimTile())
         createObjectFifoAllocationInfo(
-            builder, ctx, SymbolRefAttr::get(ctx, producer.getName()),
-            producer.getProducerTileOp().colIndex(), producerChan.direction,
-            producerChan.channel, producer.getPlio(), bdPacket);
+            builder, ctx, producer, producer.getProducerTileOp().colIndex(),
+            producerChan.direction, producerChan.channel, producer.getPlio(),
+            bdPacket);
 
       PacketFlowOp packetflow;
       if (clPacketSwObjectFifos) {
@@ -1966,9 +1970,9 @@ struct AIEObjectFifoStatefulTransformPass
 
         if (consumer.getProducerTileOp().isShimTile())
           createObjectFifoAllocationInfo(
-              builder, ctx, SymbolRefAttr::get(ctx, producer.getName()),
-              consumer.getProducerTileOp().colIndex(), consumerChan.direction,
-              consumerChan.channel, producer.getPlio(), {});
+              builder, ctx, producer, consumer.getProducerTileOp().colIndex(),
+              consumerChan.direction, consumerChan.channel, producer.getPlio(),
+              {});
 
         if (!clPacketSwObjectFifos) {
           // create flow
@@ -1994,7 +1998,7 @@ struct AIEObjectFifoStatefulTransformPass
     //===------------------------------------------------------------------===//
     if (clDynamicObjectFifos) {
       if (failed(dynamicGlobalObjectFifos(device, builder, objectFifoTiles)))
-        signalPassFailure();
+        return signalPassFailure();
     } else {
       std::set<TileOp> dynamicTiles;
       std::set<TileOp> unrollTiles;
@@ -2012,9 +2016,9 @@ struct AIEObjectFifoStatefulTransformPass
         }
       }
       if (failed(dynamicGlobalObjectFifos(device, builder, dynamicTiles)))
-        signalPassFailure();
+        return signalPassFailure();
       if (failed(unrollForLoops(device, builder, unrollTiles)))
-        signalPassFailure();
+        return signalPassFailure();
     }
 
     //===------------------------------------------------------------------===//
@@ -2042,7 +2046,7 @@ struct AIEObjectFifoStatefulTransformPass
       //===----------------------------------------------------------------===//
       // Replace objectFifo.release ops
       //===----------------------------------------------------------------===//
-      coreOp.walk([&](ObjectFifoReleaseOp releaseOp) {
+      WalkResult res = coreOp.walk([&](ObjectFifoReleaseOp releaseOp) {
         builder.setInsertionPointAfter(releaseOp);
         ObjectFifoCreateOp op = releaseOp.getObjectFifo();
         auto port = releaseOp.getPort();
@@ -2053,7 +2057,8 @@ struct AIEObjectFifoStatefulTransformPass
           if (core.getTile() == *linkOp->getOptionalSharedTile()) {
             releaseOp->emitOpError("currently cannot access objectFifo used in "
                                    "ObjectFifoLinkOp");
-            return;
+            return WalkResult::interrupt();
+            ;
           }
         }
 
@@ -2075,12 +2080,15 @@ struct AIEObjectFifoStatefulTransformPass
           std::vector release = {releaseOp};
           releaseOps[{op, portNum}] = release;
         }
+        return WalkResult::advance();
       });
+      if (res.wasInterrupted())
+        return signalPassFailure();
 
       //===----------------------------------------------------------------===//
       // Replace objectFifo.acquire ops
       //===----------------------------------------------------------------===//
-      coreOp.walk([&](ObjectFifoAcquireOp acquireOp) {
+      res = coreOp.walk([&](ObjectFifoAcquireOp acquireOp) {
         ObjectFifoCreateOp op = acquireOp.getObjectFifo();
         builder.setInsertionPointAfter(acquireOp);
         auto port = acquireOp.getPort();
@@ -2092,7 +2100,8 @@ struct AIEObjectFifoStatefulTransformPass
           if (core.getTile() == *linkOp->getOptionalSharedTile()) {
             acquireOp->emitOpError("currently cannot access objectFifo used in "
                                    "ObjectFifoLinkOp");
-            return;
+            return WalkResult::interrupt();
+            ;
           }
         }
 
@@ -2141,7 +2150,7 @@ struct AIEObjectFifoStatefulTransformPass
           if (static_cast<size_t>(numRel) > acquiredIndices.size()) {
             acquireOp->emitOpError("cannot release more elements than are "
                                    "already acquired");
-            return;
+            return WalkResult::interrupt();
           }
           for (int i = 0; i < numRel; i++)
             acquiredIndices.erase(acquiredIndices.begin());
@@ -2188,12 +2197,16 @@ struct AIEObjectFifoStatefulTransformPass
 
         subviews[acquireOp] = subviewRefs;
         acquiresPerFifo[{op, portNum}] = acquiredIndices;
+
+        return WalkResult::advance();
       });
+      if (res.wasInterrupted())
+        return signalPassFailure();
 
       //===----------------------------------------------------------------===//
       // Replace subview.access ops
       //===----------------------------------------------------------------===//
-      coreOp.walk([&](ObjectFifoSubviewAccessOp accessOp) {
+      res = coreOp.walk([&](ObjectFifoSubviewAccessOp accessOp) {
         auto acqOp = accessOp.getSubview().getDefiningOp<ObjectFifoAcquireOp>();
         if (ObjectFifoCreateOp op = acqOp.getObjectFifo()) {
           if (auto linkOp = getOptionalLinkOp(op); linkOp.has_value()) {
@@ -2204,33 +2217,28 @@ struct AIEObjectFifoStatefulTransformPass
                   int share_dir_value = 0;
                   bool sharing = isSharedMemory(
                       op.getProducerTileOp(), consumerTileOp, &share_dir_value);
-                  if (!sharing)
+                  if (!sharing) {
                     accessOp->emitOpError(
                         "currently cannot access objectFifo used in "
                         "ObjectFifoLinkOp if the tiles don't share memory");
+                    return WalkResult::interrupt();
+                  }
                 }
               }
-            } else
+            } else {
               accessOp->emitOpError(
                   "currently cannot access objectFifo used in "
                   "ObjectFifoLinkOp if it is a distribute or join link");
+              return WalkResult::interrupt();
+            }
           }
         }
         accessOp.getOutput().replaceAllUsesWith(
             subviews[acqOp][accessOp.getIndex()]->getBuffer());
+        return WalkResult::advance();
       });
-    }
-    // make global symbols to replace the to be erased ObjectFifoCreateOps
-    for (auto createOp : device.getOps<ObjectFifoCreateOp>()) {
-      builder.setInsertionPointToStart(device.getBody());
-      auto sym_name = createOp.getName();
-      createOp->setAttr(SymbolTable::getSymbolAttrName(),
-                        builder.getStringAttr("__erase_" + sym_name));
-      auto memrefType = llvm::cast<AIEObjectFifoType>(createOp.getElemType())
-                            .getElementType();
-      builder.create<memref::GlobalOp>(builder.getUnknownLoc(), sym_name,
-                                       builder.getStringAttr("public"),
-                                       memrefType, nullptr, false, nullptr);
+      if (res.wasInterrupted())
+        return signalPassFailure();
     }
 
     //===------------------------------------------------------------------===//
@@ -2238,16 +2246,35 @@ struct AIEObjectFifoStatefulTransformPass
     //===------------------------------------------------------------------===//
     SetVector<Operation *> opsToErase;
     device.walk([&](Operation *op) {
-      if (isa<ObjectFifoCreateOp, ObjectFifoLinkOp,
-              ObjectFifoRegisterExternalBuffersOp, ObjectFifoAcquireOp,
-              ObjectFifoSubviewAccessOp, ObjectFifoReleaseOp,
-              ObjectFifoAllocateOp>(op))
+      if (isa<ObjectFifoLinkOp, ObjectFifoRegisterExternalBuffersOp,
+              ObjectFifoAcquireOp, ObjectFifoSubviewAccessOp,
+              ObjectFifoReleaseOp, ObjectFifoAllocateOp>(op))
         opsToErase.insert(op);
     });
     SmallVector<Operation *> sorted{opsToErase.begin(), opsToErase.end()};
     computeTopologicalSorting(sorted);
     for (auto *op : llvm::reverse(sorted))
       op->erase();
+
+    //===------------------------------------------------------------------===//
+    // Replace any remaining uses of object fifo symbol with symbol of its shim
+    // dma allocation.
+    //===------------------------------------------------------------------===//
+    opsToErase.clear();
+    for (auto createOp : device.getOps<ObjectFifoCreateOp>()) {
+      std::string shimAllocName = getShimAllocationName(createOp.getName());
+      if (failed(SymbolTable::replaceAllSymbolUses(
+              createOp.getNameAttr(), builder.getStringAttr(shimAllocName),
+              device))) {
+        createOp.emitError(
+            "failed to replace symbol uses with shim allocation");
+        return signalPassFailure();
+      }
+      opsToErase.insert(createOp);
+    }
+    for (auto *op : opsToErase) {
+      op->erase();
+    }
   }
 };
 
