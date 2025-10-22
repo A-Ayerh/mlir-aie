@@ -1,6 +1,7 @@
 build*
 _build*
 *.exe
+*.elf
 /install*
 /my_install*
 /sandbox*
