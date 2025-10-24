@@ -235,6 +235,25 @@ def main():
     outputD = iron.zeros(data_size, dtype=datatype, device="npu")
     base_aaa(inputA, inputB, outputD)
     print(outputD)
+
+    # Validation check
+    inputA_data = np.arange(data_size, dtype=np.float32)  
+    inputB_data = np.arange(data_size, dtype=np.float32)  
+    expected = np.maximum(0, inputA_data + inputB_data)
+    actual = np.asarray(outputD, dtype=np.float32)
+    print('Element-by-element comparison:')
+    for i in range(data_size):
+        print(f'Expected = ReLU({inputA_data[i]:.1f} + {inputB_data[i]:.1f}) = {expected[i]:.1f} : Received = {actual[i]:.1f}')
+    tolerance = 1e-3  # Tolerance for bfloat16 comparison
+    mismatches = np.where(~np.isclose(actual, expected, rtol=tolerance))[0]
+    if len(mismatches) == 0:
+        print('Validation passed: Output matches expected for all 128 elements')
+    else:
+        print(f'Validation failed: {len(mismatches)} mismatches found')
+        for idx in mismatches[:5]:  # Print up to 5 mismatches
+            print(f'Index {idx}: actual={actual[idx]:.1f}, expected={expected[idx]:.1f}')
+        if len(mismatches) > 5:
+            print(f'... and {len(mismatches) - 5} more mismatches')
     
 if __name__ == "__main__":
     main()
